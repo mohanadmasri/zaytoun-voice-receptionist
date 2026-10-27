@@ -1,0 +1,47 @@
+[
+  {
+    "id": "dr_khoury",
+    "name": "Dr. Rania Khoury",
+    "name_ar": "د. رانيا خوري",
+    "role": "Dentist",
+    "service_ids": ["dental_checkup", "dental_cleaning", "dental_filling"],
+    "working_days": ["monday", "tuesday", "wednesday", "thursday", "friday"],
+    "languages": ["ar", "en"]
+  },
+  {
+    "id": "dr_nassar",
+    "name": "Dr. Sami Nassar",
+    "name_ar": "د. سامي نصار",
+    "role": "Dentist",
+    "service_ids": ["dental_checkup", "dental_cleaning", "dental_filling"],
+    "working_days": ["monday", "tuesday", "thursday", "saturday"],
+    "languages": ["ar", "en"]
+  },
+  {
+    "id": "dr_mansour",
+    "name": "Dr. Yara Mansour",
+    "name_ar": "د. يارا منصور",
+    "role": "General practitioner",
+    "service_ids": ["gp_consultation"],
+    "working_days": ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday"],
+    "languages": ["ar", "en", "fr"]
+  },
+  {
+    "id": "dr_awad",
+    "name": "Dr. Karim Awad",
+    "name_ar": "د. كريم عوض",
+    "role": "Pediatrician and general practitioner",
+    "service_ids": ["pediatrics_visit", "gp_consultation"],
+    "working_days": ["monday", "wednesday", "thursday", "saturday"],
+    "languages": ["ar", "en"]
+  },
+  {
+    "id": "pt_barakat",
+    "name": "Nour Barakat",
+    "name_ar": "نور بركات",
+    "role": "Physiotherapist",
+    "service_ids": ["physiotherapy_session"],
+    "working_days": ["monday", "wednesday", "thursday", "friday", "saturday"],
+    "languages": ["ar", "en"]
+  }
+]

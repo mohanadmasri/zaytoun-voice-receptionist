@@ -1,0 +1,56 @@
+[
+  {
+    "id": "dental_checkup",
+    "name_en": "Dental check-up",
+    "name_ar": "فحص أسنان دوري",
+    "duration_min": 30,
+    "price_ils": 150,
+    "provider_ids": ["dr_khoury", "dr_nassar"],
+    "description": "Routine examination of teeth and gums."
+  },
+  {
+    "id": "dental_cleaning",
+    "name_en": "Dental cleaning",
+    "name_ar": "تنظيف أسنان",
+    "duration_min": 45,
+    "price_ils": 220,
+    "provider_ids": ["dr_khoury", "dr_nassar"],
+    "description": "Scaling and polishing."
+  },
+  {
+    "id": "dental_filling",
+    "name_en": "Dental filling",
+    "name_ar": "حشوة أسنان",
+    "duration_min": 60,
+    "price_ils": 350,
+    "provider_ids": ["dr_khoury", "dr_nassar"],
+    "description": "Treatment of a cavity found at an earlier visit."
+  },
+  {
+    "id": "gp_consultation",
+    "name_en": "GP consultation",
+    "name_ar": "استشارة طبيب عام",
+    "duration_min": 20,
+    "price_ils": 120,
+    "provider_ids": ["dr_mansour", "dr_awad"],
+    "description": "General practitioner visit for adults."
+  },
+  {
+    "id": "pediatrics_visit",
+    "name_en": "Pediatrics visit",
+    "name_ar": "زيارة طب أطفال",
+    "duration_min": 30,
+    "price_ils": 140,
+    "provider_ids": ["dr_awad"],
+    "description": "Visit for a child under 16. A parent or guardian must be named on the booking."
+  },
+  {
+    "id": "physiotherapy_session",
+    "name_en": "Physiotherapy session",
+    "name_ar": "جلسة علاج طبيعي",
+    "duration_min": 45,
+    "price_ils": 200,
+    "provider_ids": ["pt_barakat"],
+    "description": "One physiotherapy treatment session."
+  }
+]

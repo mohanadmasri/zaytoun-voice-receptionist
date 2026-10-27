@@ -1,0 +1,30 @@
+# Versions tested together on Python 3.12 (Windows and Linux).
+# They match the course's Module 2 venv (fastapi 0.141.1, pydantic 2.12.5, uvicorn 0.52.1, mcp 1.28.1),
+# so ONE venv runs the kit and your agent: pip install -r requirements.txt
+
+# Simulated clinic service and its MCP server
+fastapi==0.141.1
+uvicorn==0.52.1
+httpx==0.28.1
+pydantic==2.12.5
+python-dotenv==1.2.4
+tzdata==2026.5            # time zone data for zoneinfo (needed on Windows)
+mcp==1.28.1               # the 1.x API used in Module 5 (CrewAI 1.15.x also needs mcp~=1.28.1)
+
+# Your app: file uploads for POST /api/voice
+python-multipart==0.0.32
+
+# Voice: offline text-to-speech (voices download on first use into voice/models/)
+piper-tts==1.8.0
+onnxruntime==1.31.0
+numpy==2.5.4
+
+# UI starter (ui/app_ui.py)
+gradio==6.30.0
+
+# Optional, not installed by default:
+#   faster-whisper==1.2.1 "av<19"   # STT_PROVIDER=whisper_local (offline speech-to-text on the CPU)
+
+# Your agent framework (the versions the course used)
+langgraph==1.2.10
+openai==2.52.0

@@ -1,0 +1,31 @@
+# docker compose up --build
+# Starts the simulated clinic API on http://localhost:8101.
+# Uncomment the app block when your own service has a Dockerfile in the repo root.
+services:
+  clinic-api:
+    build:
+      context: .
+      dockerfile: services/Dockerfile
+    ports:
+      - "8101:8101"
+    environment:
+      CLINIC_API_KEY: ${CLINIC_API_KEY:-dev-key-change-me}
+      CLINIC_TODAY: ${CLINIC_TODAY:-}
+      CLINIC_TIME: ${CLINIC_TIME:-}
+
+  # app:
+  #   build: .                       # your Dockerfile (FastAPI on port 8000)
+  #   ports:
+  #     - "8000:8000"
+  #   env_file: .env                 # OPENROUTER_API_KEY and friends
+  #   environment:
+  #     CLINIC_API_URL: http://clinic-api:8101   # the MCP server inside your container calls this
+  #     CLINIC_API_KEY: ${CLINIC_API_KEY:-dev-key-change-me}
+  #   volumes:
+  #     - piper-voices:/app/voice/models        # keep downloaded Piper voices between runs
+  #   depends_on:
+  #     clinic-api:
+  #       condition: service_healthy
+
+# volumes:
+#   piper-voices:

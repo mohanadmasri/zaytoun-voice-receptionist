@@ -1,0 +1,34 @@
+[
+  {
+    "phone": "0599000111",
+    "name": "Lina Haddad",
+    "language": "ar",
+    "preferred_provider_id": "dr_khoury",
+    "notes": "Prefers appointments after 16:00.",
+    "last_visit": {"date": "2026-07-14", "service_id": "dental_cleaning", "provider_id": "dr_khoury"}
+  },
+  {
+    "phone": "0599000222",
+    "name": "Omar Saleh",
+    "language": "en",
+    "preferred_provider_id": "pt_barakat",
+    "notes": "Weekly physiotherapy. Prefers mornings.",
+    "last_visit": {"date": "2026-10-21", "service_id": "physiotherapy_session", "provider_id": "pt_barakat"}
+  },
+  {
+    "phone": "0599000333",
+    "name": "Mariam Odeh",
+    "language": "ar",
+    "preferred_provider_id": "dr_awad",
+    "notes": "Books visits for her son Adam Odeh (age 7). She is his guardian.",
+    "last_visit": {"date": "2026-09-30", "service_id": "pediatrics_visit", "provider_id": "dr_awad"}
+  },
+  {
+    "phone": "0599000444",
+    "name": "Emily Carter",
+    "language": "en",
+    "preferred_provider_id": "dr_mansour",
+    "notes": "Prefers the earliest available appointment.",
+    "last_visit": {"date": "2026-06-02", "service_id": "gp_consultation", "provider_id": "dr_mansour"}
+  }
+]

@@ -1,0 +1,16 @@
+# secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Piper voices (downloaded on first use, about 63 MB each)
+voice/models/
+*.part
+tts_test.wav
+
+# Gradio local state
+.gradio/

@@ -1,0 +1,67 @@
+{
+  "_note": "Rules for the SIMULATED calendar. The API builds the seed bookings from this file at start-up and on POST /admin/reset. Days are relative to CLINIC_TODAY: 'today', or 'first_<weekday>' = the first such weekday strictly after today. Times are clinic local time (Asia/Jerusalem).",
+  "horizon_days": 21,
+  "random_seed": "zaytoun-v1",
+  "booking_probability": 0.3,
+  "seed_patient": {"name": "Other patient", "phone": null},
+  "patient_bookings": [
+    {
+      "booking_id": "BK-0001",
+      "day": "first_wednesday", "start": "10:00",
+      "service_id": "physiotherapy_session", "provider_id": "pt_barakat",
+      "patient": {"name": "Omar Saleh", "phone": "0599000222"},
+      "purpose": "Returning patient with an upcoming booking that can be cancelled (more than 24 h ahead)."
+    },
+    {
+      "booking_id": "BK-0002",
+      "day": "today", "start": "15:00",
+      "service_id": "gp_consultation", "provider_id": "dr_mansour",
+      "patient": {"name": "Emily Carter", "phone": "0599000444"},
+      "purpose": "Starts less than 24 h after the simulated clock: a cancellation is refused (409 too_late_to_cancel)."
+    },
+    {
+      "booking_id": "BK-0003",
+      "day": "first_saturday", "start": "11:00",
+      "service_id": "pediatrics_visit", "provider_id": "dr_awad",
+      "patient": {"name": "Adam Odeh", "phone": "0599000333", "guardian_name": "Mariam Odeh"},
+      "purpose": "A child's booking with a guardian (Mariam Odeh's son)."
+    }
+  ],
+  "blocks": [
+    {
+      "id": "tuesday_dentists_khoury",
+      "day": "first_tuesday", "provider_id": "dr_khoury", "window": ["15:30", "19:00"],
+      "bookings": [["15:30", "dental_filling"], ["17:00", "dental_filling"], ["18:30", "dental_checkup"]],
+      "purpose": "First Tuesday: a dental check-up after 16:00 is free only at 16:30 and 18:00 (Dr. Khoury). 17:00 and 17:30 are taken."
+    },
+    {
+      "id": "tuesday_dentists_nassar",
+      "day": "first_tuesday", "provider_id": "dr_nassar", "window": ["15:30", "19:00"],
+      "bookings": [["15:30", "dental_cleaning"], ["16:15", "dental_cleaning"], ["17:00", "dental_checkup"], ["17:30", "dental_checkup"], ["18:00", "dental_cleaning"]],
+      "purpose": "First Tuesday: Dr. Nassar has nothing free after 15:30."
+    },
+    {
+      "id": "monday_khoury_full",
+      "day": "first_monday", "provider_id": "dr_khoury", "window": ["09:00", "19:00"], "fill": true,
+      "purpose": "First Monday: Dr. Khoury is fully booked (Dr. Nassar still has free dental slots that day)."
+    },
+    {
+      "id": "wednesday_khoury_afternoon",
+      "day": "first_wednesday", "provider_id": "dr_khoury", "window": ["15:00", "17:00"],
+      "bookings": [["15:00", "dental_cleaning"]],
+      "purpose": "First Wednesday: Dr. Khoury is free 16:00-17:00 (a dental cleaning at 16:00 fits)."
+    },
+    {
+      "id": "thursday_awad_afternoon",
+      "day": "first_thursday", "provider_id": "dr_awad", "window": ["15:30", "17:00"],
+      "bookings": [["15:30", "pediatrics_visit"]],
+      "purpose": "First Thursday: Dr. Awad is free 16:00-17:00 (pediatrics visits at 16:00 and 16:30)."
+    },
+    {
+      "id": "thursday_barakat_morning",
+      "day": "first_thursday", "provider_id": "pt_barakat", "window": ["09:00", "11:30"],
+      "bookings": [["09:00", "physiotherapy_session"]],
+      "purpose": "First Thursday: physiotherapy is free from 09:45 to 11:30."
+    }
+  ]
+}
