@@ -43,4 +43,5 @@ class ClinicGateway(Protocol):
     async def call_write(
         self, tool_name: str, args: dict[str, Any]
     ) -> dict[str, Any]: ...
+
     
