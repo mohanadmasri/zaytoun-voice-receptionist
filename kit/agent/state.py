@@ -17,13 +17,38 @@ from core.contracts import PendingAction, ToolCall
 
 # يحدد شكل الحالة المشتركة التي تنتقل بين خطوات LangGraph.
 class AgentState(TypedDict, total=False):
-
     # معرّف المحادثة واللغة المستخدمة
     session_id: str
     language: Literal["en", "ar", "unknown", "unsupported"]
 
+    # ==================================================
+    # تصنيف رسالة المريض الحالية
+    #
+    # intent: نوع طلب المستخدم.
+    # safety: مستوى الخطورة الطبية.
+    # injection_detected: هل توجد محاولة لتجاوز التعليمات؟
+    #
+    # هذه التصنيفات تخص الرسالة الحالية فقط.
+    # ==================================================
+
+    intent: Literal[
+        "booking", "medical_question", "off_topic", "other"
+    ]
+
+    safety: Literal[
+        "none", "emergency", "urgent_medical", "medical_advice"
+    ]
+
+    injection_detected: bool
     # معلومات أولية يستخرجها LLM من رسالة المريض
     service_text: str | None
+        # اسم الطبيب الذي طلبه المريض في المحادثة.
+    provider_text: str | None
+        # طريقة اختيار الطبيب:
+    # auto: نستفيد من التفضيل المسجل.
+    # specific: المريض طلب طبيبا محددا.
+    # any: المريض يقبل أي طبيب مناسب للخدمة.
+    provider_choice: Literal["auto", "specific", "any"]
     date_text: str | None
     time_text: str | None
 
@@ -36,6 +61,24 @@ class AgentState(TypedDict, total=False):
     patient_name: str | None
     patient_phone: str | None
     provider_id: str | None
+    # ==================================================
+    # تذكير — ذاكرة المريض العائد
+    #
+    # patient_lookup_phone:
+    # رقم الهاتف الذي بحثنا عنه بالفعل.
+    #
+    # patient_lookup_status:
+    # نتيجة البحث عن المريض في نظام العيادة.
+    #
+    # نستخدمهما حتى لا نكرر استدعاء get_patient
+    # عند كل رسالة في نفس المحادثة.
+    # ==================================================
+
+    patient_lookup_phone: str | None
+
+    patient_lookup_status: Literal[
+        "not_checked", "missing", "found", "new", "unavailable"
+    ]
 
     # المواعيد المتاحة والحجز الذي ينتظر الموافقة
     proposed_slots: list[dict[str, Any]]
@@ -56,10 +99,17 @@ class AgentState(TypedDict, total=False):
 def create_initial_state(session_id: str) -> AgentState:
     return {
         "session_id": session_id,
-        "language": "unknown",
+        "language": "unknown",        # التصنيف الأولي قبل وصول رسالة من المريض.
+        "intent": "other",
+        "safety": "none",
+        "injection_detected": False,
 
         # لم يستخرج LLM معلومات الحجز بعد
         "service_text": None,
+                # لم يطلب المريض طبيبا محددا بعد.
+        "provider_text": None,
+                # في بداية المحادثة لم يحدد المريض تفضيله.
+        "provider_choice": "auto",
         "date_text": None,
         "time_text": None,
 
@@ -72,7 +122,9 @@ def create_initial_state(session_id: str) -> AgentState:
         "patient_name": None,
         "patient_phone": None,
         "provider_id": None,
-
+        # لم نبحث عن المريض في نظام العيادة بعد.
+        "patient_lookup_phone": None,
+        "patient_lookup_status": "not_checked",
         # لا توجد مواعيد مقترحة أو عمليات تنتظر الموافقة
         "proposed_slots": [],
         "selected_slot_id": None,
