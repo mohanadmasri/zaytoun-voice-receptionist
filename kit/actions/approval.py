@@ -18,7 +18,7 @@ from time import perf_counter
 
 from core.contracts import ChatResponse, ClinicGateway
 from core.session_store import session_store
-
+from agent.slot_handoff import slot_matches_request
 # تجهيز طلب حجز يحتاج إلى موافقة المريض.
 def prepare_booking_action(state: AgentState) -> PendingAction:
 
@@ -52,10 +52,26 @@ def prepare_booking_action(state: AgentState) -> PendingAction:
     if selected_slot is None:
         raise ValueError("Selected slot was not found")
 
-    # منع اعتماد موعد بتاريخ مختلف عن التاريخ المطلوب
+    
+    # تذكير — التأكد من تطابق تاريخ الموعد.
     if selected_slot.get("date") != state["requested_date"]:
         raise ValueError("Selected slot date does not match")
 
+    # تذكير — التأكد من تطابق الوقت والطبيب والخدمة.
+    # لا نجهز طلب موافقة إذا كان الموعد مختلفا.
+    if not slot_matches_request(state, selected_slot):
+        raise ValueError(
+            "Selected slot does not match the patient request"
+        )
+
+
+    # تذكير:
+    # لا نجهز طلب موافقة على موعد لا يطابق
+    # الوقت أو الطبيب الذي اختاره المريض.
+    if not slot_matches_request(state, selected_slot):
+        raise ValueError(
+            "Selected slot does not match the patient request"
+        )
     # تحضير بيانات الحجز دون تنفيذه
     payload = {
         "slot_id": state["selected_slot_id"],
@@ -207,14 +223,30 @@ async def handle_approval(
                 "Booking details changed. Please review the appointment again.",
             )
 
-        # التأكد أن الموعد ما زال ضمن المواعيد التي عرضناها.
-        valid_slot = any(
-            slot.get("slot_id") == payload["slot_id"]
-            and slot.get("date") == state.get("requested_date")
-            for slot in state.get("proposed_slots", [])
+        
+        # تذكير:
+        # نعيد التحقق عند الموافقة، وليس عند التجهيز فقط.
+        # هذا يمنع تنفيذ حجز إذا تغيرت بيانات الطلب.
+        valid_slot = next(
+            (
+                slot
+                for slot in state.get("proposed_slots", [])
+                if slot.get("slot_id") == payload["slot_id"]
+                and slot.get("date") == state.get("requested_date")
+            ),
+            None,
         )
 
-        if not valid_slot:
+        if (
+            valid_slot is None
+            or not slot_matches_request(state, valid_slot)
+        ):
+            return _approval_response(
+                session_id,
+                state,
+                "The selected appointment must be verified again.",
+            )
+
             return _approval_response(
                 session_id,
                 state,

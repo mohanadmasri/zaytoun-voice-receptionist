@@ -22,7 +22,7 @@ from core.contracts import ClinicGateway
 from agent.service_mapping import match_service
 from agent.patient_memory import lookup_returning_patient
 from agent.service_mapping import match_provider
-# ==================================================
+from agent.times import normalize_time# ==================================================
 # تذكير — Runtime Context
 #
 # المشكلة: بعض Nodes تحتاج أدوات خارجية مثل ClinicGateway.
@@ -161,6 +161,32 @@ async def normalize_date_node(
     return {
         "requested_date": resolved_date,
         "tool_calls": calls,
+    }
+
+# ==================================================
+# تذكير — normalize_time_node
+#
+# 1. تقرأ الوقت الذي استخرجه Intake.
+# 2. تستدعي normalize_time من times.py.
+# 3. تحفظ الوقت بصيغة منظمة داخل AgentState.
+#
+# لا تستدعي MCP ولا تحجز موعدا.
+# ==================================================
+
+def normalize_time_node(state: AgentState) -> dict:
+
+    # قراءة نص الوقت الأصلي.
+    time_text = state.get("time_text")
+
+    # تحويله إلى نتيجة منظمة.
+    result = normalize_time(time_text)
+
+    # حفظ النتيجة لاستخدامها في Scheduler.
+    return {
+        "time_kind": result["kind"],
+        "requested_time": result["requested_time"],
+        "time_after": result["after"],
+        "time_before": result["before"],
     }
 
 # ==================================================
@@ -534,7 +560,7 @@ async def provider_mapping_node(
     service_id = state.get("service_id")
     provider_text = state.get("provider_text")
     preferred_id = state.get("provider_id")
-    
+
     # المريض صرح أنه يقبل أي طبيب.
     # لا نقيّد البحث بطبيب محدد.
     if state.get("provider_choice") == "any":
@@ -628,16 +654,18 @@ async def provider_mapping_node(
     }
 
 
+
 # ==================================================
 # تذكير — choose_next
 #
-# تفحص AgentState وتحدد اتجاه التنفيذ.
+# تفحص حالة المحادثة وتحدد الخطوة التالية:
 #
-# 1. رفض اللغات غير المدعومة.
-# 2. إيقاف التنفيذ عند فشل أدوات العيادة.
-# 3. طلب توضيح إذا تعذر التحقق من الطبيب.
-# 4. طلب معلومات الحجز الناقصة.
-# 5. السماح بالمتابعة إذا اكتملت البيانات.
+# 1. رفض اللغة غير المدعومة.
+# 2. التعامل مع فشل أدوات العيادة.
+# 3. طلب توضيح الطبيب غير المعروف.
+# 4. طلب بيانات الحجز الناقصة.
+# 5. طلب توضيح الوقت الغامض (جديد).
+# 6. متابعة الحجز إذا كانت البيانات جاهزة.
 # ==================================================
 
 def choose_next(
@@ -647,6 +675,7 @@ def choose_next(
     "clinic_error",
     "clarify",
     "clarify_provider",
+    "clarify_time",
     "ready",
 ]:
 
@@ -654,8 +683,7 @@ def choose_next(
     if state.get("language") == "unsupported":
         return "unsupported"
 
-    # 2. عدم الاستمرار عند فشل معلومات العيادة
-    # أو فشل التحقق من بيانات الأطباء.
+    # 2. عدم الاستمرار عند فشل أدوات العيادة.
     if state.get("stage") in (
         "clinic_unavailable",
         "services_unavailable",
@@ -663,13 +691,11 @@ def choose_next(
     ):
         return "clinic_error"
 
-    # 3. المريض طلب طبيبا، لكننا لم نتمكن
-    # من التحقق من اسمه أو ملاءمته للخدمة.
+    # 3. المريض طلب طبيبا لم نتمكن من التحقق منه.
     if state.get("stage") == "provider_unverified":
         return "clarify_provider"
 
-    # 4. طلب المعلومات الناقصة أو التاريخ غير المفهوم.
-    # لا نتابع دون خدمة رسمية وتاريخ واضح.
+    # 4. التحقق من وجود الخدمة والتاريخ المطلوبين.
     if (
         not state.get("service_text")
         or not state.get("requested_date")
@@ -677,8 +703,28 @@ def choose_next(
     ):
         return "clarify"
 
-    # 5. الخدمة والتاريخ موجودان، ويمكن استكمال الحجز.
+    # ==========================================
+    # 5. التعديل الجديد — التحقق من الوقت.
+    #
+    # ambiguous:
+    # مثل 4:30 دون تحديد صباحا أو مساء.
+    #
+    # unrecognized:
+    # المريض ذكر وقتا لم نستطع فهمه.
+    #
+    # في الحالتين نطلب توضيحا ولا نخمن.
+    # ==========================================
+
+    if state.get("time_kind") in (
+        "ambiguous",
+        "unrecognized",
+    ):
+        return "clarify_time"
+
+    # 6. جميع المعلومات الضرورية جاهزة.
+    # يمكن للـScheduler البحث عن المواعيد.
     return "ready"
+
 
 # تسأل عن أول معلومة ناقصة.
 def clarify_node(state: AgentState) -> dict:
@@ -711,6 +757,30 @@ def clarify_node(state: AgentState) -> dict:
         "stage": "awaiting_details",
     }
 
+
+# ==================================================
+# تذكير — clarify_time_node
+#
+# لا نختار ساعة عشوائية عندما يكون
+# كلام المريض عن الوقت غير واضح.
+# ==================================================
+
+def clarify_time_node(state: AgentState) -> dict:
+
+    is_arabic = state.get("language") == "ar"
+
+    reply = (
+        "هل تقصد صباحا أم مساء؟ "
+        "يرجى توضيح الوقت الذي يناسبك."
+        if is_arabic
+        else "Could you clarify the time you prefer? "
+             "For example, do you mean AM or PM?"
+    )
+
+    return {
+        "reply": reply,
+        "stage": "awaiting_time_clarification",
+    }
 
 # تحدد أن الخدمة والتاريخ جاهزان للمرحلة التالية.
 def ready_node(state: AgentState) -> dict:
@@ -817,13 +887,17 @@ def build_graph():
 
     builder.add_node("safety", safety_node)
 
-    builder.add_node("normalize_date", normalize_date_node)
+    builder.add_node("normalize_date", normalize_date_node) 
+
+    builder.add_node("normalize_time", normalize_time_node)
 
     builder.add_node("service_mapping", service_mapping_node)
 
     builder.add_node("provider_mapping", provider_mapping_node)
 
     builder.add_node("clarify", clarify_node)
+
+    builder.add_node("clarify_time", clarify_time_node)
 
     builder.add_node("clarify_provider", clarify_provider_node)
 
@@ -867,11 +941,19 @@ def build_graph():
         "normalize_date",
     )
 
-    # بعد التاريخ نحدد الخدمة الرسمية.
+    
+    # بعد معالجة التاريخ، نعالج الوقت.
     builder.add_edge(
         "normalize_date",
+        "normalize_time",
+    )
+
+    # بعد تحليل الوقت، نحدد الخدمة الرسمية.
+    builder.add_edge(
+        "normalize_time",
         "service_mapping",
     )
+
 
     # بعد الخدمة نتحقق من الطبيب المطلوب.
     builder.add_edge(
@@ -890,6 +972,7 @@ def build_graph():
         choose_next,
         {
             "clarify": "clarify",
+            "clarify_time": "clarify_time",
             "clarify_provider": "clarify_provider",
             "ready": "ready",
             "unsupported": "unsupported",
@@ -906,6 +989,8 @@ def build_graph():
     builder.add_edge("unsupported", END)
 
     builder.add_edge("clarify", END)
+
+    builder.add_edge("clarify_time", END)
 
     builder.add_edge("clarify_provider", END)
 

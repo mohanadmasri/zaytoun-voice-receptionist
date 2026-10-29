@@ -126,13 +126,19 @@ def match_provider(
     def clean_name(name: str) -> str:
         normalized = normalize_service_text(name)
 
+        # تذكير:
+        # إزالة الألقاب الشائعة قبل مقارنة أسماء الأطباء.
+        # ندعم الألقاب العربية مع "الـ" وبدونها.
         titles = (
             "dr ",
             "doctor ",
-            "د ",
+            "الدكتور ",
+            "الدكتورة ",
             "دكتور ",
             "دكتورة ",
+            "د ",
         )
+
 
         for title in titles:
             if normalized.startswith(title):
