@@ -12,9 +12,9 @@ from typing import Literal
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
-from pydantic import BaseModel
+import re
+from pydantic import BaseModel, model_validator
 from agent.state import AgentState
-
 # تحميل متغيرات البيئة من ملف .env
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
@@ -43,6 +43,54 @@ class IntakeResult(BaseModel):
 
     # هل حاول المستخدم تجاوز تعليمات النظام؟
     injection_detected: bool = False
+
+
+    # ==================================================
+    # تذكير — تصحيح دمج التاريخ والوقت من LLM
+    #
+    # مثال:
+    # tomorrow morning
+    # يصبح:
+    # date_text = tomorrow
+    # time_text = morning
+    #
+    # لا نستبدل الوقت إذا كان LLM قد استخرجه بالفعل.
+    # ==================================================
+
+    @model_validator(mode="after")
+    def separate_date_and_time(self):
+
+        # لا يوجد تاريخ يحتاج المعالجة.
+        if not self.date_text:
+            return self
+
+        text = self.date_text.strip()
+
+        # البحث عن فترة زمنية في نهاية التاريخ.
+        pattern = (
+            r"\s+(?P<period>"
+            r"morning|afternoon|evening|"
+            r"بعد\s+الظهر|قبل\s+الظهر|"
+            r"الصباح|صباح(?:ا|ًا)?|"
+            r"المساء|مساء(?:ً|ا)?|العصر"
+            r")\s*$"
+        )
+
+        match = re.search(pattern, text, re.IGNORECASE)
+
+        if match:
+            date_only = text[:match.start()].strip()
+            time_only = match.group("period")
+
+            # لا نقبل فصل النص إذا لم يبق تاريخ.
+            if date_only:
+                self.date_text = date_only
+
+                # نعتمد الوقت الأصلي إذا كان موجودا.
+                if not self.time_text:
+                    self.time_text = time_only
+
+        return self
 
 # تستقبل رسالة المريض وترسلها إلى LLM لاستخراج معلومات الحجز.
 
@@ -104,6 +152,14 @@ async def extract_request(message: str) -> IntakeResult:
     "Use unsupported only for clearly unsupported languages. "
     "Use unknown for very short or ambiguous messages. "
     "Keep date and time expressions as written by the user. "
+    "Separate dates from times whenever possible. "
+    "Put only the date or day in date_text. "
+    "Put clock times and time-of-day periods in time_text. "
+    "For 'tomorrow morning', use date_text='tomorrow' "
+    "and time_text='morning'. "
+    "For 'Tuesday afternoon', use date_text='Tuesday' "
+    "and time_text='afternoon'. "
+    
     "Do not invent missing information. "
 
     # ==================================================
@@ -268,12 +324,21 @@ def update_state_from_intake(
                 # منع استخدام حجز معلق بعد تغيير معلومات الطلب
                 updated_state["pending_action"] = None
 
+                
+                # تذكير:
+                # إذا تغيرت بيانات الحجز أو هوية المريض،
+                # لا نستخدم المواعيد المختارة سابقا.
                 if field in (
-                "service_text",
-                 "date_text",
-                  "time_text",
-                   "provider_text",
-     ):
+                    "service_text",
+                    "date_text",
+                    "time_text",
+                    "provider_text",
+                    "patient_name",
+                    "patient_phone",
+                ):
+                    updated_state["proposed_slots"] = []
+                    updated_state["selected_slot_id"] = None
+
                     updated_state["proposed_slots"] = []
                     updated_state["selected_slot_id"] = None
 
@@ -304,12 +369,19 @@ def update_state_from_intake(
     # الهدف: عدم خلط بيانات مريضين مختلفين.
     # ==================================================
 
+  
     if updated_state.get("patient_phone") != state.get("patient_phone"):
 
+        # تغيير رقم الهاتف يعني أننا بحاجة
+        # للبحث عن سجل المريض الجديد.
         updated_state["patient_lookup_phone"] = None
         updated_state["patient_lookup_status"] = "not_checked"
 
+        # تذكير:
+        # لا ننقل طبيب المريض القديم أو تفضيلاته
+        # إلى سجل المريض الجديد.
         updated_state["provider_id"] = None
+        updated_state["preferred_provider_id"] = None
 
         if not result.patient_name:
             updated_state["patient_name"] = None

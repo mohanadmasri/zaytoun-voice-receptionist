@@ -57,10 +57,35 @@ class AgentState(TypedDict, total=False):
     requested_date: str | None
     time_window: str | None
 
+    # تذكير — نتيجة تحليل الوقت.
+    # exact: ساعة محددة.
+    # window: فترة زمنية.
+    # missing: لم يحدد المريض وقتا.
+    # ambiguous/unrecognized: نحتاج توضيحا.
+    time_kind: Literal[
+        "exact", "window", "missing",
+        "ambiguous", "unrecognized"
+    ]
+
+    # الوقت المحدد، مثلا 16:30.
+    requested_time: str | None
+
+    # حدود الفترة الزمنية للبحث عن المواعيد.
+    time_after: str | None
+    time_before: str | None
+
     # معلومات المريض والطبيب
+    
+    # معلومات المريض والطبيب المستخدم للحجز الحالي.
     patient_name: str | None
     patient_phone: str | None
     provider_id: str | None
+
+    # تذكير:
+    # الطبيب المفضل في سجل المريض.
+    # لا يعني بالضرورة أننا سنحجز عنده.
+    preferred_provider_id: str | None
+
     # ==================================================
     # تذكير — ذاكرة المريض العائد
     #
@@ -118,10 +143,18 @@ def create_initial_state(session_id: str) -> AgentState:
         "requested_date": None,
         "time_window": None,
 
+        # لم نحلل تفضيل الوقت بعد.
+        "time_kind": "missing",
+        "requested_time": None,
+        "time_after": None,
+        "time_before": None,
+
         # معلومات المريض غير معروفة بعد
         "patient_name": None,
         "patient_phone": None,
         "provider_id": None,
+                # لا نعرف الطبيب المفضل قبل البحث عن المريض.
+        "preferred_provider_id": None,
         # لم نبحث عن المريض في نظام العيادة بعد.
         "patient_lookup_phone": None,
         "patient_lookup_status": "not_checked",
