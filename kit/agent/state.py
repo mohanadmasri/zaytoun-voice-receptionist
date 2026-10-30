@@ -17,6 +17,12 @@ from core.contracts import PendingAction, ToolCall
 
 # يحدد شكل الحالة المشتركة التي تنتقل بين خطوات LangGraph.
 class AgentState(TypedDict, total=False):
+    # أسماء موثقة للعرض ومجموعة المرشحين عند التباس الاختيار، دون تغيير معرفات الحجز.
+    service_catalog: list[dict[str, Any]]
+    provider_catalog: list[dict[str, Any]]
+    selection_candidates: list[str]
+    offer_context: dict[str, Any] | None
+    current_input_language: str | None
     # معرّف المحادثة واللغة المستخدمة
     session_id: str
     language: Literal["en", "ar", "unknown", "unsupported"]
@@ -124,6 +130,11 @@ class AgentState(TypedDict, total=False):
 def create_initial_state(session_id: str) -> AgentState:
     return {
         "session_id": session_id,
+        "service_catalog": [],
+        "provider_catalog": [],
+        "selection_candidates": [],
+        "offer_context": None,
+        "current_input_language": None,
         "language": "unknown",        # التصنيف الأولي قبل وصول رسالة من المريض.
         "intent": "other",
         "safety": "none",

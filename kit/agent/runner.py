@@ -16,11 +16,13 @@ from core.session_store import session_store
 
 
 
-# تنسق معالجة رسالة واحدة من المريض.
+# تنسق رسالة message داخل session_id باستخدام gateway؛ input_language لغة تسجيل مفحوصة أو None للنص.
+# async/await تنتظر Graph دون حجب استقبال بقية الجلسات، ثم تحفظ الحالة لنفس الجلسة.
 async def handle_message(
     session_id: str,
     message: str,
-    gateway: ClinicGateway
+    gateway: ClinicGateway,
+    input_language: str | None = None,
 ) -> ChatResponse:
 
     # 1. استرجاع بيانات المحادثة السابقة
@@ -28,6 +30,7 @@ async def handle_message(
 
     # 2. وضع رسالة المريض الجديدة داخل الحالة
     state["current_message"] = message
+    state["current_input_language"] = input_language
 
     # 3. تشغيل LangGraph وتمرير Gateway
     updated_state = await graph.ainvoke(
@@ -44,6 +47,7 @@ async def handle_message(
         "reply": updated_state.get("reply", ""),
         "tool_calls": updated_state.get("tool_calls", []),
         "state": updated_state.get("stage"),
+        "language": updated_state.get("language", "en"),
     }
 
     # إضافة عملية تنتظر الموافقة إذا كانت موجودة

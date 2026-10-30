@@ -39,6 +39,9 @@ def _result(
 
 # أسماء الساعات المكتوبة بالكلمات العربية.
 ARABIC_HOURS = {
+    "واحد": 1, "واحدة": 1, "اثنين": 2, "اتنين": 2, "تنتين": 2,
+    "ثلاثة": 3, "تلاتة": 3, "أربعة": 4, "اربعة": 4, "خمسة": 5,
+    "ستة": 6, "سبعة": 7, "ثمانية": 8, "تمانية": 8, "تسعة": 9, "عشرة": 10,
     "الواحدة": 1,
     "الاولى": 1,
     "الثانية": 2,
@@ -70,6 +73,12 @@ def normalize_time(
         return _result("missing")
 
     text = time_text.lower().strip()
+    # أرقام الساعة المنطوقة تبقى خاضعة لفحص AM/PM؛ three o'clock وحدها ليست 3 PM.
+    english_hours = {name: index for index, name in enumerate(
+        "zero one two three four five six seven eight nine ten eleven twelve".split())}
+    text = re.sub(r"\b(?:" + "|".join(english_hours) + r")\b",
+                  lambda match: str(english_hours[match.group()]), text)
+    text = re.sub(r"\s+o['’]?clock\b", "", text)
 
     # إزالة التشكيل العربي.
     text = re.sub(r"[\u064b-\u065f\u0670]", "", text)
@@ -111,7 +120,7 @@ def normalize_time(
         bool(re.search(r"\bp\.?m\.?\b", text))
         or any(value in text for value in (
             "afternoon", "evening",
-            "مساء", "بعد الظهر", "العصر",
+            "مساء", "المسا", "بعد الظهر", "العصر",
         ))
     )
 
@@ -134,7 +143,7 @@ def normalize_time(
         # قراءة ساعة مع AM/PM أو كلمات عربية.
         numeric = re.search(
             r"(?<!\d)(\d{1,2})\s*"
-            r"(?:a\.?m\.?|p\.?m\.?|صباحا?|مساءا?)(?!\w)",
+            r"(?:a\.?m\.?|p\.?m\.?|in\s+(?:the\s+)?(?:morning|afternoon|evening)|صباحا?|مساءا?|بعد\s+(?:الظهر|العصر)|العصر)(?!\w)",
             text,
         )
 
@@ -154,6 +163,8 @@ def normalize_time(
                 text,
             )
 
+        if numeric is None:
+            numeric = re.fullmatch(r"(\d{1,2})", text)
         hour = int(numeric.group(1)) if numeric else None
         minute = 0
         leading_zero = False
@@ -180,6 +191,10 @@ def normalize_time(
                     minute = 30
 
                 break
+
+    # أجزاء الساعة المحكية تُطبّق بعد قراءة الرقم أو الكلمة، دون افتراض صباح/مساء.
+    if hour is not None and ("وربع" in text or "والربع" in text):
+        minute = 15
 
     # معالجة ساعة واضحة.
     if hour is not None:

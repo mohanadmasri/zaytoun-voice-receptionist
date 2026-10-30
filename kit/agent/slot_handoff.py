@@ -10,6 +10,28 @@ from datetime import date
 from agent.state import AgentState
 
 
+# بصمة القيود المتحققة تربط قائمة البدائل بالطلب الذي أنتجها، ولا تشمل لغة العرض أو بيانات المريض.
+def scheduling_signature(state: AgentState) -> dict:
+    return {key: state.get(key) for key in ("service_id", "requested_date", "provider_id", "provider_choice",
+                                           "time_kind", "requested_time", "time_after", "time_before")}
+
+
+# تتحقق من اختيار داخل القائمة الحالية. القيود الأصلية تظل صارمة إلا لبديل عرضه Scheduler
+# ببحث MCP موثق، وبنفس بصمة الطلب. هذه لا تختار موعدًا ولا تنفذ كتابة.
+def slot_matches_offer(state: AgentState, slot: dict) -> bool:
+    offered = next((item for item in state.get("proposed_slots", []) if item.get("slot_id") == slot.get("slot_id")), None)
+    if offered is None or any(offered.get(key) != slot.get(key) for key in ("date", "start", "provider_id", "service_id")):
+        return False
+    context = state.get("offer_context") or {}
+    if context and context.get("request") != scheduling_signature(state):
+        return False
+    if slot_matches_request(state, slot):
+        return True
+    if context.get("request") != scheduling_signature(state) or slot.get("slot_id") not in context.get("slot_ids", []):
+        return False
+    return slot_matches_request({**state, **context.get("search", {})}, slot)
+
+
 # تحويل الوقت إلى عدد دقائق منذ منتصف الليل.
 def _minutes(value: str) -> int:
 

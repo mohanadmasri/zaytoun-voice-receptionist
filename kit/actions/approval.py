@@ -18,7 +18,8 @@ from time import perf_counter
 
 from core.contracts import ChatResponse, ClinicGateway
 from core.session_store import session_store
-from agent.slot_handoff import slot_matches_request
+from agent.slot_handoff import slot_matches_offer
+from agent.presentation import say, booking_summary
 # تجهيز طلب حجز يحتاج إلى موافقة المريض.
 def prepare_booking_action(state: AgentState) -> PendingAction:
 
@@ -59,7 +60,7 @@ def prepare_booking_action(state: AgentState) -> PendingAction:
 
     # تذكير — التأكد من تطابق الوقت والطبيب والخدمة.
     # لا نجهز طلب موافقة إذا كان الموعد مختلفا.
-    if not slot_matches_request(state, selected_slot):
+    if not slot_matches_offer(state, selected_slot):
         raise ValueError(
             "Selected slot does not match the patient request"
         )
@@ -68,7 +69,7 @@ def prepare_booking_action(state: AgentState) -> PendingAction:
     # تذكير:
     # لا نجهز طلب موافقة على موعد لا يطابق
     # الوقت أو الطبيب الذي اختاره المريض.
-    if not slot_matches_request(state, selected_slot):
+    if not slot_matches_offer(state, selected_slot):
         raise ValueError(
             "Selected slot does not match the patient request"
         )
@@ -82,23 +83,17 @@ def prepare_booking_action(state: AgentState) -> PendingAction:
 
     # إعادة نفس العملية المعلقة إذا لم تتغير تفاصيل الحجز
     existing = state.get("pending_action")
+    summary = booking_summary(state, selected_slot)
 
     if (
         existing is not None
         and existing["type"] == "create_booking"
         and existing["payload"] == payload
     ):
-        return existing
+        return {**existing, "summary": summary}
 
     # تجهيز وصف واضح لما سيوافق عليه المريض
-    summary = (
-        f"Book {state['service_id']} "
-        f"on {selected_slot['date']} "
-        f"at {selected_slot['start']} "
-        f"with {selected_slot['provider_name']} "
-        f"for {state['patient_name']} "
-        f"({state['patient_phone']})"
-    )
+    # الملخص بلغة الجلسة وأسماء الكتالوج؛ payload ومعرف العملية لا يتغيران بتغيير اللغة.
 
     # إنشاء عملية معلقة بمعرف فريد
     pending_action: PendingAction = {
@@ -149,6 +144,7 @@ def _approval_response(
         "reply": reply,
         "state": state.get("stage"),
         "tool_calls": tool_calls or [],
+        "language": state.get("language", "en"),
     }
 
     if state.get("pending_action") is not None:
@@ -181,7 +177,7 @@ async def handle_approval(
             return _approval_response(
                 session_id,
                 state,
-                "No matching pending action. No booking was attempted.",
+                say(state, "No matching pending action. No booking was attempted.", "ما في طلب موافقة مطابق. ما تم أي حجز."),
             )
 
         # هذه المرحلة تدعم إنشاء الحجز فقط.
@@ -189,7 +185,7 @@ async def handle_approval(
             return _approval_response(
                 session_id,
                 state,
-                "This action type is not supported yet.",
+                say(state, "This action type is not supported yet.", "هالعملية مش مدعومة حاليًا."),
             )
 
         # الحالة الأولى: المريض رفض.
@@ -204,7 +200,7 @@ async def handle_approval(
             return _approval_response(
                 session_id,
                 state,
-                "Your request was rejected. No booking was made.",
+                say(state, "Your request was rejected. No booking was made.", "تم إلغاء الطلب، وما تم أي حجز. بتحب نبحث عن موعد تاني؟"),
             )
 
         # الحالة الثانية: المريض وافق.
@@ -220,7 +216,7 @@ async def handle_approval(
             return _approval_response(
                 session_id,
                 state,
-                "Booking details changed. Please review the appointment again.",
+                say(state, "Booking details changed. Please review the appointment again.", "تفاصيل الموعد تغيّرت. راجعها مرة تانية، لو سمحت."),
             )
 
         
@@ -239,12 +235,12 @@ async def handle_approval(
 
         if (
             valid_slot is None
-            or not slot_matches_request(state, valid_slot)
+            or not slot_matches_offer(state, valid_slot)
         ):
             return _approval_response(
                 session_id,
                 state,
-                "The selected appointment must be verified again.",
+                say(state, "The selected appointment must be verified again.", "لازم نتحقق من الموعد المختار مرة تانية."),
             )
 
             return _approval_response(
@@ -300,7 +296,7 @@ async def handle_approval(
             return _approval_response(
                 session_id,
                 state,
-                f"Your appointment is confirmed. Booking ID: {booking['booking_id']}",
+                say(state, f"Your appointment is confirmed. Booking ID: {booking['booking_id']}", f"تم تأكيد موعدك. رقم الحجز: {booking['booking_id']}"),
                 tool_calls,
                 booking,
             )
@@ -321,7 +317,7 @@ async def handle_approval(
             return _approval_response(
                 session_id,
                 state,
-                "This slot is no longer available. Please choose another appointment.",
+                say(state, "This slot is no longer available. Please choose another appointment.", "هالموعد ما عاد متاح. خلينا نختار موعد تاني."),
                 tool_calls,
             )
 
@@ -332,6 +328,6 @@ async def handle_approval(
         return _approval_response(
             session_id,
             state,
-            "The booking could not be confirmed. Please try again.",
+            say(state, "The booking could not be confirmed. Please try again.", "ما قدرنا نؤكد الحجز. جرّب مرة تانية، لو سمحت."),
             tool_calls,
         )

@@ -15,7 +15,9 @@ from openai import AsyncOpenAI
 import re
 from pydantic import BaseModel, model_validator
 from agent.state import AgentState
-from agent.slot_selection import extract_time, find_slots_by_id, extract_option_numbers
+from agent.service_mapping import explicit_service_evidence, match_service
+from agent.times import normalize_time
+from agent.slot_selection import extract_time, find_slots_by_id, extract_option_numbers, has_slot_reference
 # تحميل متغيرات البيئة من ملف .env
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
@@ -66,6 +68,13 @@ class IntakeResult(BaseModel):
             return self
 
         text = self.date_text.strip()
+        # نفصل ساعة كاملة مثل Tuesday at three o'clock بدل إبقائها داخل التاريخ.
+        clock = re.search(r"\s+(?P<time>(?:at|after|before|على الساعة|بعد الساعة|قبل الساعة|الساعة)\s+.+)$", text, re.IGNORECASE)
+        if clock and normalize_time(clock.group("time"))["kind"] not in ("missing", "unrecognized"):
+            self.date_text = text[:clock.start()].strip()
+            if not self.time_text:
+                self.time_text = clock.group("time")
+            return self
 
         # البحث عن فترة زمنية في نهاية التاريخ.
         pattern = (
@@ -162,6 +171,13 @@ async def extract_request(message: str) -> IntakeResult:
     "and time_text='afternoon'. "
     
     "Do not invent missing information. "
+    # الاختصاص العام لا يعني فحصًا محددًا؛ نحتفظ به لطلب توضيح من قائمة العيادة.
+    "Keep 'dentist appointment', 'دكتور اسنان', and 'طبيب الأسنان' generic in service_text; "
+    "do not infer checkup, cleaning, or filling unless the caller specifies it. "
+    "Explicit procedures take precedence: 'I need a dental checkup', 'dental checkup', and 'check up' "
+    "must keep checkup in service_text, never replace it with dentist appointment. "
+    "A short service name is a valid answer to a clarification, not an empty request. "
+    "'أكشف على أسناني' means a dental examination; cleaning and filling are different services. "
 
     # ==================================================
     # 3. استخراج اسم الطبيب المطلوب
@@ -279,7 +295,7 @@ def is_slot_selection_reply(state: AgentState, result: IntakeResult) -> bool:
     ) or not state.get("proposed_slots"):
         return False
 
-    for field in ("service_text", "date_text", "provider_text"):
+    for field in ("service_text", "date_text"):
         value = getattr(result, field)
         if value and value.strip() != state.get(field):
             return False
@@ -287,6 +303,11 @@ def is_slot_selection_reply(state: AgentState, result: IntakeResult) -> bool:
         return False
 
     message = state.get("current_message", "")
+    if re.search(r"\b(?:after|before)\b|بعد\s+الساعة|قبل\s+الساعة|(?:change|أغير|اغير|غير).*?(?:time|الوقت)", message, re.IGNORECASE):
+        return False
+    # اسم طبيب ضمن اختيار موعد معروض لا يغيّر شروط البحث أو يمسح قائمته.
+    if has_slot_reference(state, message):
+        return True
     # حتى الرقم غير الصالح يذهب للتحقق، ولا يتحول إلى وقت بحث جديد من LLM.
     if extract_option_numbers(message) is not None:
         return True
@@ -308,10 +329,14 @@ def update_state_from_intake(
 ) -> AgentState:
     # ننسخ الحالة كي لا نعدّل النسخة الأصلية مباشرة.
     updated_state = state.copy()
+    evidence = explicit_service_evidence(state.get("current_message", ""))
+    if evidence and result.language != "unsupported":
+        # نص صريح فقط؛ فحوص السلامة والنية لا تتغير، والمعرف يُتحقق منه لاحقًا بالكتالوج.
+        result = result.model_copy(update={"service_text": evidence})
 
     # الوقت هنا يحدد عنصرًا من القائمة، وليس فلترًا جديدًا للبحث.
     if is_slot_selection_reply(state, result):
-        result = result.model_copy(update={"time_text": None})
+        result = result.model_copy(update={"time_text": None, "provider_text": None, "provider_any": False})
 
     # هذه التصنيفات تخص الرسالة الحالية، لذلك نحدّثها في كل مرة.
     updated_state["intent"] = result.intent
@@ -355,6 +380,14 @@ def update_state_from_intake(
         if value == updated_state.get(field):
             continue
 
+        # تغيير الصياغة لنفس خدمة الكتالوج أو نفس الوقت لا يبطل اختيارًا أو موافقة.
+        if field == "service_text" and updated_state.get("service_id") and match_service(value, updated_state.get("service_catalog", [])) == updated_state["service_id"]:
+            updated_state[field] = value
+            continue
+        if field == "time_text" and normalize_time(value)["kind"] in ("exact", "window", "missing") and normalize_time(value) == normalize_time(updated_state.get(field)):
+            updated_state[field] = value
+            continue
+
         updated_state[field] = value
 
         # أي تغيير في تفاصيل الطلب أو هوية المريض يبطل موافقة قديمة.
@@ -364,6 +397,8 @@ def update_state_from_intake(
             # تغيّر شروط البحث: لا يجوز استخدام المواعيد القديمة.
             updated_state["proposed_slots"] = []
             updated_state["selected_slot_id"] = None
+            updated_state["selection_candidates"] = []
+            updated_state["offer_context"] = None
 
         # أمّا الاسم والهاتف فلا يمسحان المواعيد المقترحة.
         if field == "service_text":
@@ -392,7 +427,8 @@ def update_state_from_intake(
             updated_state["provider_id"] = None
 
         # لا ننقل اسم مريض قديم إلى رقم هاتف جديد دون تصريح.
-        if not result.patient_name:
+        # الهاتف الأول يكمل بيانات المريض نفسه؛ تغيير رقم قديم يعني هوية جديدة.
+        if state.get("patient_phone") and not result.patient_name:
             updated_state["patient_name"] = None
 
     # تحديث اختيار الطبيب، لكن فقط إذا تغيّر بالفعل.
@@ -417,6 +453,7 @@ def update_state_from_intake(
             updated_state["proposed_slots"] = []
             updated_state["selected_slot_id"] = None
             updated_state["pending_action"] = None
+            updated_state["selection_candidates"] = []
 
     # نحتفظ بمرحلة المتابعة فقط إذا بقيت المقترحات صالحة بعد الدمج.
     if state.get("stage") in (

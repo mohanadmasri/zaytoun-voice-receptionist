@@ -28,8 +28,11 @@ from agent.patient_memory import lookup_returning_patient
 from agent.service_mapping import match_provider
 from agent.scheduler_node import scheduler_node
 from agent.slot_selection import select_slot, extract_time, find_slots_by_id, extract_option_numbers
-from agent.slot_handoff import slot_matches_request
+from agent.slot_handoff import slot_matches_offer
 from actions.approval import prepare_booking_action
+from agent.presentation import say
+from agent.service_mapping import service_question
+from agent.slot_selection import has_slot_reference
 # ==================================================
 # تذكير — Runtime Context
 #
@@ -59,6 +62,9 @@ async def intake_node(state: AgentState) -> AgentState:
 
     # استخراج المعلومات باستخدام LLM
     result = await extract_request(message)
+    if state.get("current_input_language") in ("ar", "en") and result.language != "unsupported":
+        # لا تُمرر هذه القيمة إلا بعد فحص transcript من لغة التسجيل الصريحة.
+        result = result.model_copy(update={"language": state["current_input_language"]})
 
     # دمج المعلومات الجديدة مع السابقة
     updated_state = update_state_from_intake(state, result)
@@ -177,6 +183,7 @@ async def normalize_date_node(
     # تخزين التاريخ النهائي داخل AgentState
     return {
         "requested_date": resolved_date,
+        "provider_catalog": clinic.get("providers", []),
         "tool_calls": calls,
     }
 
@@ -268,6 +275,7 @@ async def service_mapping_node(
 
     return {
         "service_id": service_id,
+        "service_catalog": result["services"],
         "tool_calls": calls,
     }
 
@@ -330,12 +338,7 @@ def route_after_intake(
 def slot_followup_node(state: AgentState) -> dict:
     updates = {}
     message = state.get("current_message", "")
-    choosing = bool(
-        extract_option_numbers(message) is not None
-        or extract_time(message) is not None
-        or find_slots_by_id(state.get("proposed_slots", []), message)
-        or "SL-" in message.upper()
-    )
+    choosing = has_slot_reference(state, message)
     if choosing or not state.get("selected_slot_id"):
         updates = select_slot(state, message)
         if updates.get("stage") != "slot_selected":
@@ -345,22 +348,28 @@ def slot_followup_node(state: AgentState) -> dict:
     selected_state = {**state, **updates}
     selected = next((slot for slot in selected_state.get("proposed_slots", [])
                      if slot.get("slot_id") == selected_state.get("selected_slot_id")), None)
-    if selected is None or not slot_matches_request(selected_state, selected):
+    if selected is None or not slot_matches_offer(selected_state, selected):
         return {"stage": "awaiting_slot_selection", "selected_slot_id": None,
-                "pending_action": None, "reply": "Please choose a matching displayed slot."}
+                "pending_action": None, "reply": say(state, "Please choose one of the available appointments.", "اختار موعد من الخيارات المتاحة، لو سمحت.")}
 
     if not selected_state.get("patient_name") or not selected_state.get("patient_phone"):
+        question = (say(state, "What is your full name?", "شو اسمك الكامل؟") if not selected_state.get("patient_name")
+                    else say(state, "What is your phone number?", "شو رقم تلفونك؟"))
         return {**updates, "stage": "awaiting_patient_details", "pending_action": None,
-                "reply": "Please provide your full name and phone number."}
+                "reply": question}
 
     try:
         pending = prepare_booking_action(selected_state)
     except ValueError:
         # لا نتجاوز تحقق الموافقة، بما فيه شرط ولي الأمر لمسار الأطفال.
         return {**updates, "stage": "awaiting_patient_details", "pending_action": None,
-                "reply": "Booking details need verification before approval can be prepared."}
-    return {**updates, "stage": "awaiting_approval", "pending_action": pending,
-            "reply": f"Please review and explicitly approve: {pending['summary']}"}
+                "reply": say(state, "We need to verify the booking details first.", "لازم نتحقق من بيانات الحجز أولًا.")}
+    existing = state.get("pending_action")
+    reply = say(state, f"Please review and approve: {pending['summary']}", f"راجع التفاصيل ووافق لتأكيد الحجز: {pending['summary']}")
+    if existing and existing.get("summary") == pending["summary"] and not choosing:
+        reply = say(state, "Use Approve to confirm, or Reject to choose another appointment.",
+                    "للتأكيد اضغط زر الموافقة، أو الرفض إذا بدك موعد تاني.")
+    return {**updates, "stage": "awaiting_approval", "pending_action": pending, "reply": reply}
 
 # ==================================================
 # تذكير — safety_node
@@ -449,6 +458,7 @@ def safety_node(state: AgentState) -> dict:
         "pending_action": None,
         "selected_slot_id": None,
         "proposed_slots": [],
+        "selection_candidates": [],
     }
 
 # ==================================================
@@ -754,6 +764,8 @@ def clarify_node(state: AgentState) -> dict:
             if is_arabic
             else "What type of appointment would you like?"
         )
+    elif not state.get("service_id"):
+        reply = service_question(state)
     elif not state.get("requested_date"):
         reply = (
             "في أي يوم ترغب بحجز الموعد؟"
@@ -762,12 +774,7 @@ def clarify_node(state: AgentState) -> dict:
         )
     else:
         # إذا كان التاريخ معروفا لكن الخدمة غير محددة رسميا.
-        reply = (
-            "لم أتمكن من تحديد الخدمة المطلوبة. هل يمكنك توضيح نوع الموعد؟"
-            if is_arabic
-            else "I could not identify the service. "
-                 "Could you clarify which appointment you need?"
-        )
+        reply = service_question(state)
 
     return {
         "reply": reply,

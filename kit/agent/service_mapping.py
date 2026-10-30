@@ -40,7 +40,63 @@ def normalize_service_text(text: str) -> str:
 # توحد أسنان/الأسنان بعد إزالة الهمزات، داخل مقارنة الخدمات فقط.
 # لا تغير normalize_service_text المشتركة مع مطابقة أسماء الأطباء.
 def normalize_service_name(text: str) -> str:
-    return re.sub(r"\bالاسنان\b", "اسنان", normalize_service_text(text))
+    normalized = normalize_service_text(text)
+    return re.sub(r"\b(?:الاسنان|اسناني|سناني)\b", "اسنان", normalized)
+
+
+# تلتقط دليل الإجراء الصريح من رسالة المريض، لا من تلخيص LLM الذي قد يعيده لاختصاص عام.
+# تعيد نص خدمة للمطابقة اللاحقة مع الكتالوج، لا معرفًا مخترعًا؛ تعدد الإجراءات يبقى غامضًا.
+def explicit_service_evidence(message: str) -> str | None:
+    text = normalize_service_name(message)
+    dental = bool(re.search(r"اسنان|\bdental\b|\bdentist\b|\bteeth\b", text))
+    procedures = {
+        "checkup": r"\bcheckup\b|\b(?:فحص|اكشف|كشف)\b",
+        "cleaning": r"\bcleaning\b|\bscaling\b|تنظيف|تنضيف",
+        "filling": r"\bfilling\b|حشو|حشوة|حشوات",
+    }
+    matches = [name for name, pattern in procedures.items() if re.search(pattern, text)]
+    if not matches:
+        return None
+    # العبارات الإنجليزية الصريحة أو جواب قصير باسم الخدمة لا يحتاجان تخمين تخصص جديد.
+    short = bool(re.fullmatch(r"(?:please\s+)?(?:checkup|cleaning|filling)(?:\s+please)?", text))
+    if not dental and not short:
+        return None
+    if len(matches) > 1:
+        return message
+    if dental:
+        return {"checkup": "dental checkup", "cleaning": "dental cleaning", "filling": "dental filling"}[matches[0]]
+    return matches[0]
+
+
+# تفهم نوع إجراء الأسنان المصرح به، ولا تحول طلب طبيب أسنان عام إلى فحص تلقائي.
+# لا تعيد إلا معرفًا موجودًا في كتالوج MCP؛ تعدد الإجراءات يظل غامضًا.
+def dental_aliases(text: str, services: list[dict]) -> set[str]:
+    text = normalize_service_name(text)
+    if not re.search(r"اسنان|\bdental\b|\bdentist\b|\bteeth\b", text):
+        return set()
+    kinds = {
+        "dental_checkup": r"\b(?:فحص|اكشف|كشف)\b|\bcheckup\b|\bexamination\b",
+        "dental_cleaning": r"تنظيف|تنضيف|\bcleaning\b|\bscaling\b",
+        "dental_filling": r"حشو|حشوة|حشوات|\bfilling\b",
+    }
+    available = {service.get("id") for service in services}
+    return {service_id for service_id, pattern in kinds.items()
+            if service_id in available and re.search(pattern, text)}
+
+
+# تصوغ سؤالًا واحدًا عن خدمة أسنان عامة، وتذكر الخيارات الموجودة فعليًا فقط.
+def service_question(state: dict) -> str:
+    from agent.presentation import say
+    text = normalize_service_name(state.get("service_text") or "")
+    options = [s for s in state.get("service_catalog", [])
+               if str(s.get("id", "")).startswith("dental_")]
+    if re.search(r"اسنان|\bdentist\b|\bdental\b", text) and options:
+        names = [s.get("name_ar") if state.get("language") == "ar" else s.get("name_en") for s in options]
+        names = [name for name in names if name]
+        if names:
+            return say(state, "Would you like " + ", ".join(names) + "?",
+                       "بدك " + "، أو ".join(names) + "؟")
+    return say(state, "What type of appointment would you like?", "شو نوع الموعد اللي بدك إياه؟")
 
 
 # تستقبل كلام المريض وقائمة الخدمات الرسمية، وتعيد معرف خدمة وحيدة دون تخمين.
@@ -55,7 +111,12 @@ def match_service(
     if not requested:
         return None
 
-    matches = set()
+    aliases = dental_aliases(service_text, services)
+    if len(aliases) > 1:
+        return None
+
+    # المرادف يضيف مرشحًا ولا يتجاوز وجود خدمة رسمية أخرى مطابقة بنفس الاسم.
+    matches = set(aliases)
 
     for service in services:
 

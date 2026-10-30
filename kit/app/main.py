@@ -7,7 +7,7 @@
 import asyncio
 from collections import defaultdict
 from time import perf_counter
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, File, Form, UploadFile
 from fastapi.responses import JSONResponse
@@ -19,6 +19,7 @@ from core.contracts import ClinicGateway as GatewayProtocol
 from integrations.mcp_gateway import ClinicGateway
 from integrations.voice_adapter import VoiceAdapter, VoiceError, MAX_AUDIO_BYTES, EMPTY_AUDIO
 from core.session_store import session_store
+from agent.presentation import say
 
 
 NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
@@ -31,6 +32,7 @@ class ChatRequest(BaseModel):
     session_id: NonEmptyText
     message: NonEmptyText
     user: dict[str, Any] | None = None
+    continuation: StrictBool = False
 
 
 # يرفض payload من المتصفح؛ مصدر بيانات الحجز هو SessionStore فقط.
@@ -93,30 +95,44 @@ async def health():
 # تستقبل معرف الجلسة والنص والبوابة، وتعيد استجابة Graph مع سجل الجولة كاملًا.
 # هذه نقطة المعالجة المشتركة للنص والصوت؛ لا نرسل HTTP من الخادم إلى نفسه.
 # القفل يشمل قراءة الحالة ومعالجتها وحفظها لمنع ضياع تحديثات الجلسة المتزامنة.
-async def process_message(session_id: str, message: str, gateway):
+async def process_message(session_id: str, message: str, gateway, continuation: bool = False, input_language: str | None = None):
     traced = TracedGateway(gateway)
     async with app.state.session_locks[session_id]:
+        session_reset = continuation and not session_store.contains(session_id)
         try:
-            response = await handle_message(session_id, message, traced)
+            response = (await handle_message(session_id, message, traced, input_language)
+                        if input_language else await handle_message(session_id, message, traced))
         except Exception:
             # لا نعيد نص الاستثناء الذي قد يحتوي معلومات داخلية أو حساسة.
             raise HTTPException(503, "Unable to process the message. Please try again.") from None
-    return {**response, "tool_calls": traced.tool_calls}
+    if session_reset:
+        response["reply"] = say(response, "The previous session is no longer available; let's review the appointment again. ",
+                                "الجلسة السابقة مش موجودة؛ خلينا نراجع الموعد من جديد. ") + response["reply"]
+    return {**response, "tool_calls": traced.tool_calls, "session_reset": session_reset}
 
 
 # تستقبل JSON المفحوص بـPydantic وتستخدم نفس المعالجة التي يستدعيها مسار الصوت.
 @app.post("/api/chat", response_model=None)
 async def chat(body: ChatRequest, gateway=Depends(get_gateway)):
-    return await process_message(body.session_id, body.message, gateway)
+    return await process_message(body.session_id, body.message, gateway, body.continuation)
 
 
 # تعيد خطأ صوتيًّا واضحًا مع حالة الجلسة وموافقتها الحالية دون تغييرهما.
 # تبقى أزرار الموافقة ظاهرة إذا فشل التسجيل بعد تجهيز طلب سابق.
-async def voice_error_response(session_id: str, error: VoiceError, transcript: str = ""):
+async def voice_error_response(session_id: str, error: VoiceError, transcript: str = "", language_hint: str | None = None):
     async with app.state.session_locks[session_id]:
         state = session_store.get_or_create(session_id)
+    if language_hint in ("ar", "en"):
+        state["language"] = language_hint
     response = {"session_id": session_id, "reply": str(error), "tool_calls": [],
-                "state": state.get("stage"), "transcript": transcript, **EMPTY_AUDIO}
+                "state": state.get("stage"), "language": state.get("language", "en"), "transcript": transcript, **EMPTY_AUDIO}
+    if state.get("language") == "ar":
+        response["reply"] = {
+            413: "التسجيل طويل. جرّب تسجيل أقصر، لو سمحت.",
+            415: "استخدم تسجيل WAV أو MP3، أو اكتب رسالتك.",
+            422: "التفريغ مش واضح أو ما بطابق لغة التسجيل. ممكن تعيد التسجيل باللغة المختارة أو تكتب رسالتك؟",
+            504: "الرد أخذ وقت طويل. جرّب مرة تانية أو اكتب رسالتك.",
+        }.get(error.status_code, "خدمة الصوت مش متاحة هلأ. جرّب تكتب رسالتك.")
     if state.get("pending_action") is not None:
         response["pending_action"] = state["pending_action"]
     return JSONResponse(status_code=error.status_code, content=response)
@@ -128,6 +144,7 @@ async def voice_error_response(session_id: str, error: VoiceError, transcript: s
 @app.post("/api/voice", response_model=None)
 async def voice(
     audio: UploadFile = File(...), session_id: str = Form(...),
+    language_hint: Literal["ar", "en"] | None = Form(None), continuation: bool = Form(False),
     gateway=Depends(get_gateway), adapter=Depends(get_voice_adapter),
 ):
     session_id = session_id.strip()
@@ -140,16 +157,16 @@ async def voice(
         data = await audio.read(MAX_AUDIO_BYTES + 1)
         if len(data) > MAX_AUDIO_BYTES:
             raise VoiceError(413, "The recording is too large. Please use a shorter recording (up to 10 MB).")
-        transcript = await adapter.transcribe(data)
-        response = await asyncio.wait_for(process_message(session_id, transcript, gateway), timeout=60)
+        transcript = await adapter.transcribe(data, language_hint)
+        response = await asyncio.wait_for(process_message(session_id, transcript, gateway, continuation, language_hint), timeout=60)
     except VoiceError as error:
-        return await voice_error_response(session_id, error, transcript)
+        return await voice_error_response(session_id, error, transcript, language_hint)
     except TimeoutError:
-        return await voice_error_response(session_id, VoiceError(504, "The voice request took too long. Please try again."), transcript)
+        return await voice_error_response(session_id, VoiceError(504, "The voice request took too long. Please try again."), transcript, language_hint)
     except HTTPException as error:
-        return await voice_error_response(session_id, VoiceError(error.status_code, str(error.detail)), transcript)
+        return await voice_error_response(session_id, VoiceError(error.status_code, str(error.detail)), transcript, language_hint)
     except Exception:
-        return await voice_error_response(session_id, VoiceError(503, "Unable to process the recording. Please try again or type your message."), transcript)
+        return await voice_error_response(session_id, VoiceError(503, "Unable to process the recording. Please try again or type your message."), transcript, language_hint)
     finally:
         await audio.close()
     # القراءة أو تجهيز الموافقة اكتملت؛ فشل TTS يجب ألا يعيد معالجة الرسالة.

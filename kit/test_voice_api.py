@@ -148,7 +148,7 @@ class VoiceApiTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_full_voice_to_approval_demo(self):
         searched = await self.search()
-        self.assertIn("2. 2026-11-03 | 15:45", searched["reply"])
+        self.assertIn("2. 3:45 PM with Dr. Rania Khoury", searched["reply"])
         for text in ("option two", "الخيار الثاني"):
             response = await self.send_voice(text, time_text="2")
             data = response.json()

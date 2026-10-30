@@ -13,18 +13,21 @@
 import re
 
 from agent.state import AgentState
-from agent.slot_handoff import slot_matches_request
+from agent.slot_handoff import slot_matches_offer
+from agent.presentation import say, display_date, display_time, provider_label
 
 
 # تستقبل قائمة المواعيد المصفاة وتعيد نصًا مرقمًا بنفس ترتيبها دون فرز أو نسخ مواعيد.
-# الرقم للعرض فقط؛ معرّف الموعد الحقيقي يظل مصدر الاختيار والحجز لاحقًا.
-def format_slot_options(slots: list[dict]) -> str:
-    return "\n".join(
-        f"{index}. {slot['date']} | {slot['start']} | "
-        f"{slot.get('provider_name') or slot.get('provider_id', 'Unknown provider')} | "
-        f"ID: {slot['slot_id']}"
-        for index, slot in enumerate(slots, start=1)
-    )
+# نذكر التاريخ مرة واحدة ونخفي المعرفات؛ الرقم للعرض والمعرف الحقيقي يبقى داخل الحالة.
+def format_slot_options(slots: list[dict], state: dict | None = None) -> str:
+    state = state or {}
+    language = state.get("language", "en")
+    day = display_date(slots[0]["date"], language) if slots else ""
+    header = say(state, f"Available appointments for {day}:", f"لقيت مواعيد متاحة ليوم {day}:")
+    lines = [f"{index}. {display_time(slot['start'], language)} "
+             + say(state, "with ", "مع ") + provider_label(slot, state)
+             for index, slot in enumerate(slots, start=1)]
+    return "\n".join([header, *lines, say(state, "Which one would you prefer?", "أي موعد بناسبك؟")])
 
 
 # تحول كلمات الأرقام في عبارة اختيار فقط إلى أرقام، وتعيد نسخة للتحليل المحلي.
@@ -48,7 +51,9 @@ def normalize_spoken_options(message: str) -> str:
     word_pattern = "|".join(re.escape(word) for word in sorted(words, key=len, reverse=True))
     item = rf"(?:[+-]?\d+(?:\.\d+)?|(?:{word_pattern}))(?!\w)"
     items = rf"{item}(?:\s*(?:,|،|and\b|or\b|و|أو)\s*{item})*"
-    prefix = r"(?:options?|choices?|choose|select|pick|الخيار|خيار|أختار|اختار)\s*(?:number\s*|رقم\s*)?"
+    prefix = r"(?:options?|choices?|appointment|choose|select|pick|الموعد|الخيار|خيار|أختار|اختار)\s*(?:number\s*|رقم\s*)?"
+    text = re.sub(rf"\bthe\s+({word_pattern})\s+(?:one|appointment|option)\b",
+                  r"option \1", text, flags=re.IGNORECASE)
 
     # يستبدل الكلمات داخل مقطع الاختيار المطابق فقط، مع إبقاء الروابط لكشف التعارض.
     def replace_words(match):
@@ -70,7 +75,7 @@ def extract_option_numbers(message: str) -> list[int] | None:
     number_list = r"[+-]?\d+(?:\.\d+)?(?:\s*(?:,|،|and\b|or\b|و|أو)\s*[+-]?\d+(?:\.\d+)?)*"
     bare = re.fullmatch(rf"\s*({number_list})\s*[.!]?\s*", text, re.IGNORECASE)
     labelled = list(re.finditer(
-        rf"(?<!\w)(?:options?|choices?|الخيار|خيار|choose|select|pick|أختار|اختار)"
+        rf"(?<!\w)(?:options?|choices?|appointment|الموعد|الخيار|خيار|choose|select|pick|أختار|اختار)"
         rf"\s*(?:number\s*|رقم\s*)?({number_list})(?![\w:])",
         text, re.IGNORECASE,
     ))
@@ -160,27 +165,61 @@ def find_slots_by_id(
     return matches
 
 
-# محاولة تحديد الطبيب من أسماء الأطباء المعروضة.
+# تطابق اسمًا جزئيًا عربيًا أو إنجليزيًا مع أسماء الأطباء الموثقة في القائمة والكتالوج.
+# تعيد جميع المتعادلين بأعلى تطابق، حتى لا يتحول اسم مشترك إلى اختيار عشوائي.
 def filter_by_provider(
     slots: list[dict],
     message: str,
+    state: dict | None = None,
 ) -> list[dict]:
-
-    message_lower = message.casefold()
-
-    matches = []
-
+    from agent.service_mapping import normalize_service_text
+    state = state or {}
+    titles = {"dr", "doctor", "د", "دكتور", "دكتورة", "الدكتور", "الدكتورة", "طبيب", "طبيبة", "الطبيب", "الطبيبة"}
+    # الاسم الذي يأتي بعد «اسمي» هو اسم المريض لا اسم الطبيب، حتى لو كانا متشابهين.
+    provider_message = re.split(r"اسمي|رقمي|my name|phone", message, maxsplit=1, flags=re.IGNORECASE)[0]
+    tokens = set(normalize_service_text(provider_message).split()) - titles
+    scores = []
     for slot in slots:
-        provider_name = slot.get("provider_name")
+        provider = next((p for p in state.get("provider_catalog", []) if p.get("id") == slot.get("provider_id")), {})
+        names = " ".join(str(name or "") for name in (slot.get("provider_name"), slot.get("provider_name_ar"),
+                                                        provider.get("name"), provider.get("name_ar")))
+        name_tokens = set(normalize_service_text(names).split()) - titles
+        scores.append(len(tokens & name_tokens))
+    best = max(scores, default=0)
+    return [slot for slot, score in zip(slots, scores) if best and score == best]
 
-        if not isinstance(provider_name, str):
-            continue
 
-        # مطابقة الاسم الكامل للطبيب.
-        if provider_name.casefold() in message_lower:
-            matches.append(slot)
+# تكتشف إشارة اختيار من القائمة الحالية؛ تستثني تقديم الاسم والهاتف من مطابقة اسم الطبيب.
+def has_slot_reference(state: dict, message: str) -> bool:
+    return bool(extract_option_numbers(message) is not None or re.search(r"\d{1,2}:\d{2}", message)
+                or "SL-" in message.upper()
+                or (filter_by_provider(state.get("proposed_slots", []), message, state)
+                    and not re.search(r"اسمي|رقمي|my name|phone", message, re.IGNORECASE)))
 
-    return matches
+
+# تعيد الساعات المحتملة لوقت غير موسوم بالصباح/المساء، ولا تختار إلا من المواعيد المعروضة.
+# عند وجود 03:45 و15:45 معًا يبقى الاختيار غامضًا بدل افتراض فترة زمنية.
+def offered_clock_times(message: str) -> list[str] | None:
+    text = message.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789"))
+    tokens = re.findall(r"\b\d{1,2}:\d{2}\s*(?:AM|PM)?\b", text, re.IGNORECASE)
+    if not tokens:
+        return None
+    if len(tokens) != 1:
+        return []
+    value = extract_time(tokens[0])
+    if value is None:
+        return []
+    hour, minute = map(int, value.split(":"))
+    if re.search(r"AM|PM", tokens[0], re.IGNORECASE) or hour > 12 or tokens[0].startswith("0"):
+        return [value]
+    am, pm = bool(re.search(r"صباح|الصبح", text)), bool(re.search(r"مساء|العصر|بعد الظهر", text))
+    if am and pm:
+        return []
+    if pm:
+        return [f"{hour % 12 + 12:02d}:{minute:02d}"]
+    if am:
+        return [f"{hour % 12:02d}:{minute:02d}"]
+    return [f"{hour % 12:02d}:{minute:02d}", f"{hour % 12 + 12:02d}:{minute:02d}"]
 
 
 # تستقبل state التي تحتوي القائمة الحالية وmessage التي تحمل اختيار المريض.
@@ -198,20 +237,16 @@ def select_slot(
         return {
             "stage": "awaiting_slot_selection",
             "selected_slot_id": None,
-            "reply": (
-                "There are no available slots to select. "
-                "Please search for appointments again."
-            ),
+            "pending_action": None, "selection_candidates": [],
+            "reply": say(state, "Please search for appointments first.", "خلينا نبحث عن مواعيد متاحة أولًا."),
         }
 
     # لا نعطي أولوية صامتة لرقم على معرّف أو ساعة؛ يجب أن تتفق كل الإشارات.
     # نعيد عرض القائمة كاملة عند الرفض كي تبقى أرقامها مطابقة للحالة المحفوظة.
     rejected = {
         "stage": "awaiting_slot_selection", "selected_slot_id": None,
-        "pending_action": None,
-        "reply": "Invalid, conflicting, or ambiguous selection. "
-                 "Choose one option number or slot ID from the current list:\n"
-                 + format_slot_options(slots),
+        "pending_action": None, "selection_candidates": [],
+        "reply": say(state, "Please choose one of the displayed option numbers.", "اختار رقم موعد واحد من القائمة المعروضة، لو سمحت."),
     }
     if re.search(r"\b(?:old|previous|earlier)\s+(?:list|options?)\b|القائمة\s+القديمة|الخيارات\s+السابقة",
                  message, re.IGNORECASE):
@@ -237,36 +272,46 @@ def select_slot(
         matches = [slot for slot in matches if slot is id_matches[0]]
         has_selection = True
 
-    time_tokens = re.findall(r"\b\d{1,2}:\d{2}\s*(?:AM|PM)?\b", message, re.IGNORECASE)
-    if time_tokens:
-        if len(time_tokens) != 1:
+    clock_times = offered_clock_times(message)
+    if clock_times is not None:
+        if not clock_times:
             return rejected
-        requested_time = extract_time(time_tokens[0])
-        if requested_time is None:
-            return rejected
-        matches = [slot for slot in matches if slot.get("start") == requested_time]
+        matches = [slot for slot in matches if slot.get("start") in clock_times]
         has_selection = True
 
-    provider_matches = filter_by_provider(slots, message)
+    provider_matches = filter_by_provider(slots, message, state)
     if provider_matches:
+        if not has_selection and state.get("selection_candidates"):
+            matches = [slot for slot in matches if slot["slot_id"] in state["selection_candidates"]]
         matches = [slot for slot in matches if slot in provider_matches]
-
-    if not has_selection or len(matches) != 1:
+        has_selection = True
+    elif re.search(r"\b(?:dr|doctor)\b|دكتور|دكتورة|طبيب|طبيبة", message, re.IGNORECASE):
         return rejected
+
+    if has_selection and not matches and clock_times is not None and provider_matches:
+        return {**rejected, "reply": say(state, "That time and doctor are not together in the displayed options. Which option would you prefer?",
+                                        "هالساعة مع هالطبيب مش ضمن الخيارات المعروضة. أي خيار بناسبك؟")}
+    if not has_selection or not matches:
+        return rejected
+    if len(matches) > 1:
+        doctors = list(dict.fromkeys(provider_label(slot, state) for slot in matches))
+        question = say(state, "Which doctor would you prefer: ", "عند أي طبيب بتفضّل: ") + "، ".join(doctors) + "؟"
+        if len(doctors) == 1:
+            question = say(state, "More than one time is available with this doctor. Which time would you prefer?",
+                           "في أكتر من وقت متاح عند هالطبيب. أي ساعة بتناسبك؟")
+        return {**rejected, "selection_candidates": [slot["slot_id"] for slot in matches], "reply": question}
 
     selected = matches[0]
 
     # التحقق من تطابق الموعد مع الطلب الأصلي.
-    if not slot_matches_request(state, selected):
+    if not slot_matches_offer(state, selected):
         return {
             "stage": "awaiting_slot_selection",
             "selected_slot_id": None,
             "pending_action": None,
-            "reply": (
-                "This appointment does not match your "
-                "verified request. Please search again "
-                "or choose another matching slot."
-            ),
+            "selection_candidates": [],
+            "reply": say(state, "This appointment does not match your request. Please choose another.",
+                         "هالموعد ما بطابق طلبك. اختار موعد تاني، لو سمحت."),
         }
 
     # حفظ الاختيار فقط، دون إجراء حجز.
@@ -274,9 +319,6 @@ def select_slot(
         "stage": "slot_selected",
         "selected_slot_id": selected["slot_id"],
         "pending_action": None,
-        "reply": (
-            f"You selected {selected.get('start')} with "
-            f"{selected.get('provider_name', 'the doctor')}. "
-            "Please provide your full name and phone number."
-        ),
+        "selection_candidates": [],
+        "reply": say(state, "Appointment selected.", "تم اختيار الموعد."),
     }

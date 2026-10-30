@@ -39,7 +39,7 @@ class VoiceUiTests(unittest.TestCase):
             outputs = app_ui.send_voice("samples/audio/en_02_vague_friday.wav", [], self.request)
             self.assertEqual(outputs[1], "option two")
             self.assertEqual(outputs[5], self.response["pending_action"])
-            self.assertEqual(json.loads(outputs[8]), {"text": "1. Test appointment", "audio": None})
+            self.assertEqual(json.loads(outputs[8]), {"text": "1. Test appointment", "audio": None, "language": None})
             app_ui.send_text("option 2", [], self.request)
             app_ui.reject(self.response["pending_action"], [], self.request)
         self.assertEqual([path for path, _ in calls], ["/api/voice", "/api/chat", "/api/approve"])

@@ -25,6 +25,8 @@ class PendingAction(TypedDict):
 
 
 class ChatResponse(TypedDict):
+    session_reset: NotRequired[bool]
+    language: NotRequired[str]
     session_id: str
     reply: str
     tool_calls: list[ToolCall]
@@ -43,4 +45,4 @@ class ClinicGateway(Protocol):
     async def call_write(
         self, tool_name: str, args: dict[str, Any]
     ) -> dict[str, Any]: ...
-    
+

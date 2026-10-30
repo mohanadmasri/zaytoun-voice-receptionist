@@ -65,8 +65,9 @@ class NumberedSelectionTests(unittest.TestCase):
         result = select_slot(selection_state(), "I choose 3:45 PM")
         self.assertEqual(result["stage"], "awaiting_slot_selection")
         self.assertIsNone(result["selected_slot_id"])
-        lines = [line for line in result["reply"].splitlines() if re.match(r"\d+\.", line)]
-        self.assertEqual([line.split("ID: ")[1] for line in lines], ["SL-A", "SL-B", "SL-C"])
+        self.assertEqual(result["selection_candidates"], ["SL-B", "SL-C"])
+        self.assertIn("Which doctor", result["reply"])
+        self.assertNotIn("SL-", result["reply"])
 
     def test_numbers_use_only_current_list_and_revalidate(self):
         state = selection_state()
@@ -154,9 +155,11 @@ class NumberedApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.state()["proposed_slots"], SLOTS)
         lines = [line for line in data["reply"].splitlines() if re.match(r"\d+\.", line)]
         self.assertEqual(lines, [
-            "1. 2026-11-03 | 16:00 | Dr. Rania Khoury | ID: SL-A",
-            "2. 2026-11-03 | 15:45 | Dr. Rania Khoury | ID: SL-B",
-            "3. 2026-11-03 | 15:45 | Dr. Sami Nassar | ID: SL-C"])
+            "1. 4:00 PM with Dr. Rania Khoury",
+            "2. 3:45 PM with Dr. Rania Khoury",
+            "3. 3:45 PM with Dr. Sami Nassar"])
+        self.assertEqual(data["reply"].count("November 3, 2026"), 1)
+        self.assertNotIn("SL-", data["reply"])
         for absent in ("09:00", "15:00", "2026-11-04", "SL-MORNING", "SL-WRONG-DATE"):
             self.assertNotIn(absent, data["reply"])
         self.assertIsNone(data.get("pending_action"))

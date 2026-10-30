@@ -6,6 +6,7 @@ import asyncio
 import base64
 import io
 import os
+import re
 import wave
 
 from voice import STTError, speak, transcribe
@@ -50,11 +51,11 @@ def validate_audio(data: bytes) -> None:
 class VoiceAdapter:
     # تستقبل التسجيل كـbytes وتعيد النص الأصلي كما فرغه STT دون تبديل أسماء أو أرقام.
     # المهلة تمنع تعليق HTTP؛ انتهاء المهلة لا يستطيع إيقاف thread الشبكة بالقوة.
-    async def transcribe(self, data: bytes) -> str:
+    async def transcribe(self, data: bytes, language_hint: str | None = None) -> str:
         validate_audio(data)
         try:
             text = await asyncio.wait_for(
-                asyncio.to_thread(transcribe, data), timeout=STT_TIMEOUT_SECONDS,
+                asyncio.to_thread(transcribe, data, language_hint), timeout=STT_TIMEOUT_SECONDS,
             )
         except TimeoutError:
             raise VoiceError(504, "Speech recognition took too long. Please try again or type your message.") from None
@@ -66,6 +67,12 @@ class VoiceAdapter:
             raise VoiceError(422, "Sorry, I didn't catch that. Please record again or type your message.")
         if len(text) > 8000:
             raise VoiceError(422, "The transcript is too long. Please use a shorter recording.")
+        # نفحص كتابة اللغة قبل عرض النص أو تشغيل Graph؛ لا نعيد ترجمة نتيجة خاطئة.
+        letters = [letter for letter in text if letter.isalpha()]
+        arabic = sum(bool(re.match(r"[\u0600-\u06ff]", letter)) for letter in letters)
+        if letters and ((language_hint == "ar" and arabic / len(letters) < 0.3)
+                        or (language_hint == "en" and arabic / len(letters) >= 0.3)):
+            raise VoiceError(422, "The transcript does not match the selected recording language. Please record again or type your message.")
         return text.strip()
 
     # تستقبل رد المساعد وتعيد حقول الصوت؛ None يجعل Gradio ينطق النص بالمتصفح.

@@ -24,6 +24,11 @@ class SessionStore:
         self._sessions: dict[str, AgentState] = {}
         self._lock = Lock()
 
+    # تفحص وجود الجلسة دون إنشائها؛ لتمييز إعادة تشغيل الخادم عن فقد حقل أثناء المحادثة.
+    def contains(self, session_id: str) -> bool:
+        with self._lock:
+            return session_id in self._sessions
+
     # استرجاع حالة موجودة أو إنشاء حالة لمحادثة جديدة.
     def get_or_create(self, session_id: str) -> AgentState:
 

@@ -42,6 +42,13 @@ ENGLISH_MONTHS = {
     "dec": 12,
 }
 
+# أسماء أيام الشهر المنطوقة داخل تاريخ صريح فقط، ولا تحول second إلى تاريخ خارج هذا السياق.
+ENGLISH_ORDINALS = dict(zip(
+    ("first second third fourth fifth sixth seventh eighth ninth tenth eleventh twelfth thirteenth "
+     "fourteenth fifteenth sixteenth seventeenth eighteenth nineteenth twentieth twenty-first "
+     "twenty-second twenty-third twenty-fourth twenty-fifth twenty-sixth twenty-seventh twenty-eighth "
+     "twenty-ninth thirtieth thirty-first").split(), range(1, 32)))
+
 
 # أسماء الأشهر العربية الشائعة؛ المعرف الرقمي لا يعتمد على لغة STT أو لغة الجهاز.
 ARABIC_MONTHS = {
@@ -60,6 +67,8 @@ ARABIC_MONTHS = {
 }
 
 ARABIC_WEEKDAYS = {
+    "اثنين": 0, "إثنين": 0, "ثلاثاء": 1, "أربعاء": 2, "اربعاء": 2,
+    "خميس": 3, "جمعة": 4, "سبت": 5, "أحد": 6, "احد": 6,
     "الاثنين": 0, "الإثنين": 0, "الاثنان": 0,
     "الثلاثاء": 1, "الأربعاء": 2, "الاربعاء": 2,
     "الخميس": 3, "الجمعة": 4, "السبت": 5, "الأحد": 6, "الاحد": 6,
@@ -114,6 +123,15 @@ def normalize_date(
         "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹",
         "01234567890123456789",
     ))
+    ordinal_names = "|".join(re.escape(name).replace(r"\-", "[- ]") for name in sorted(ENGLISH_ORDINALS, key=len, reverse=True))
+    # November second, 2026 وsecond November 2026 يصبحان صيغًا رقمية مدعومة أصلًا.
+    for pattern in (rf"(?P<month>{'|'.join(ENGLISH_MONTHS)})\s+(?P<day>{ordinal_names}),?\s+(?P<year>\d{{4}})",
+                    rf"(?P<day>{ordinal_names})\s+(?P<month>{'|'.join(ENGLISH_MONTHS)}),?\s+(?P<year>\d{{4}})"):
+        ordinal = re.fullmatch(pattern, text)
+        if ordinal:
+            day_number = ENGLISH_ORDINALS[ordinal.group("day").replace(" ", "-")]
+            text = f"{ordinal.group('month')} {day_number}, {ordinal.group('year')}"
+            break
 
     arabic_date = parse_arabic_calendar_date(text, today)
     if arabic_date is not None:

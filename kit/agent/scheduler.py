@@ -10,9 +10,11 @@ from agent.state import AgentState
 from agent.slot_handoff import (
     build_find_slots_args,
     slot_matches_request,
+    scheduling_signature,
 )
 from core.contracts import ClinicGateway
 from agent.slot_selection import format_slot_options
+from agent.presentation import say
 
 
 # إرسال طلب البحث الحقيقي إلى العيادة عبر MCP.
@@ -90,7 +92,7 @@ async def schedule(
     if state.get("stage") != "needs_slot_lookup":
         return {
             "stage": "awaiting_details",
-            "reply": "The appointment request is not ready for scheduling.",
+            "reply": say(state, "Please complete the appointment details first.", "خلينا نكمّل تفاصيل الموعد أولًا."),
             "proposed_slots": [],
         }
 
@@ -98,7 +100,7 @@ async def schedule(
     if provider_choice == "specific" and not provider_id:
         return {
             "stage": "awaiting_provider_clarification",
-            "reply": "Please clarify which doctor you would like.",
+            "reply": say(state, "Which doctor would you prefer?", "عند أي طبيب بتفضّل؟"),
             "proposed_slots": [],
         }
 
@@ -134,18 +136,19 @@ async def schedule(
         ):
             return {
                 "stage": "awaiting_time_clarification",
-                "reply": "Please clarify your preferred appointment time.",
+                "reply": say(state, "What time would you prefer: morning or afternoon?", "أي ساعة بتناسبك، صباحًا ولا مساءً؟"),
                 "proposed_slots": [],
             }
 
         return {
             "stage": "awaiting_details",
-            "reply": "Please clarify your appointment details.",
+            "reply": say(state, "Could you clarify the appointment details?", "ممكن توضّح تفاصيل الموعد؟"),
             "proposed_slots": [],
         }
 
     # حفظ حالة البحث عن أطباء بديلين.
     used_alternatives = False
+    used_time_alternatives = False
 
     try:
         # البحث الأول باستخدام شروط المريض.
@@ -197,12 +200,34 @@ async def schedule(
             )
 
             used_alternatives = bool(matching_slots)
+            if matching_slots:
+                search_state = alternative_state
+
+        # البحث البديل للوقت المحدد فقط؛ لا نوسع قيد after/before دون طلب المريض.
+        if not matching_slots and state.get("time_kind") == "exact":
+            requested_hour, requested_minute = map(int, state["requested_time"].split(":"))
+            target = requested_hour * 60 + requested_minute
+            after, before = max(0, target - 120), min(1440, target + 121)
+            near_state = {**search_state, "time_kind": "window", "requested_time": None,
+                          "time_after": f"{after // 60:02d}:{after % 60:02d}",
+                          "time_before": f"{before // 60:02d}:{before % 60:02d}" if before < 1440 else None}
+            near_result = await find_available_slots(gateway, build_find_slots_args(near_state, limit=50))
+            nearby = filter_matching_slots(near_state, extract_slots(near_result))
+            if not nearby and provider_choice == "auto" and near_state.get("provider_id"):
+                near_state["provider_id"] = None
+                near_result = await find_available_slots(gateway, build_find_slots_args(near_state, limit=50))
+                nearby = filter_matching_slots(near_state, extract_slots(near_result))
+                used_alternatives = bool(nearby)
+            matching_slots = sorted(nearby, key=lambda slot: (abs(int(slot["start"][:2]) * 60 + int(slot["start"][3:]) - target), slot["start"]))[:5]
+            if matching_slots:
+                search_state = near_state
+                used_time_alternatives = True
 
     # التعامل مع استجابة غير صحيحة من العيادة.
     except ValueError:
         return {
             "stage": "scheduler_error",
-            "reply": "Unable to verify available appointments right now.",
+            "reply": say(state, "I cannot check appointments right now. Please try again.", "مش قادر أتحقق من المواعيد هلأ. جرّب مرة تانية، لو سمحت."),
             "proposed_slots": [],
         }
 
@@ -210,7 +235,7 @@ async def schedule(
     except Exception:
         return {
             "stage": "scheduler_error",
-            "reply": "Unable to connect to the clinic right now.",
+            "reply": say(state, "I cannot reach the clinic right now. Please try again.", "التواصل مع العيادة مش متاح هلأ. جرّب مرة تانية، لو سمحت."),
             "proposed_slots": [],
         }
 
@@ -218,25 +243,24 @@ async def schedule(
     if not matching_slots:
         return {
             "stage": "no_slots",
-            "reply": "No matching appointments are available for your request.",
+            "reply": say(state, "No matching appointments are available. Would you like another time?", "ما في موعد متاح بطابق طلبك. بتحب وقت تاني؟"),
             "proposed_slots": [],
         }
 
     # توضيح أن بعض المواعيد من البحث البديل.
-    if used_alternatives:
-        reply = (
-            "No matching appointments were found with the preferred doctor. "
-            "Alternative appointments are available. Please select a slot."
-        )
+    if used_time_alternatives:
+        from agent.presentation import display_time
+        requested_label = display_time(state["requested_time"], state.get("language", "en"))
+        reply = say(state, f"{requested_label} is unavailable. These nearby times are available:\n",
+                    f"الساعة {requested_label} مش متاحة. هاي مواعيد قريبة متاحة:\n")
+    elif used_alternatives:
+        reply = say(state, "Your preferred doctor is unavailable. These alternatives are available:\n",
+                    "ما في موعد عند طبيبك المفضّل. هاي خيارات عند أطباء تانيين:\n")
     else:
-        reply = (
-            "Available appointments were found. "
-            "Please select a slot."
-        )
+        reply = ""
 
     # نبني العرض من نفس القائمة التي سنحفظها، فلا تتغير دلالة أرقام الخيارات.
-    reply += "\n" + format_slot_options(matching_slots)
-    reply += "\nChoose an option number (for example, option 2) or a slot ID."
+    reply += format_slot_options(matching_slots, state)
 
     # إعادة المواعيد الحقيقية دون إنشاء حجز.
     return {
@@ -245,4 +269,7 @@ async def schedule(
         "proposed_slots": matching_slots,
         "selected_slot_id": None,
         "pending_action": None,
+        "selection_candidates": [],
+        "offer_context": {"request": scheduling_signature(state), "search": scheduling_signature(search_state),
+                          "slot_ids": [slot["slot_id"] for slot in matching_slots]},
     }

@@ -1,3 +1,5 @@
+# تفريغ الصوت فقط دون ترجمة أو اختراع أسماء؛ لغة التسجيل الصريحة تُمرر من الواجهة.
+# المدخل bytes/مسار وlanguage_hint؛ المخرج transcript بنفس لغة الصوت أو STTError.
 """Speech-to-text for the receptionist.
 
     transcribe(audio, language_hint=None) -> str        audio: a file path or raw bytes
@@ -92,6 +94,8 @@ def _read(audio: str | Path | bytes) -> bytes:
     return path.read_bytes()
 
 
+# ترسل التسجيل بالتنسيق fmt وتوجيه لغة اختياري؛ تعيد تفريغ المزود أو STTError.
+# نمنع fallback غير المعلن للعربية عند اختيارها، دون تنزيل نموذج أو تغيير الخدمة الموجودة.
 def _openrouter(data: bytes, fmt: str, language_hint: str | None) -> str:
     if fmt == "wav":
         data = to_16k_mono(data)
@@ -101,9 +105,17 @@ def _openrouter(data: bytes, fmt: str, language_hint: str | None) -> str:
     key = os.getenv("OPENROUTER_API_KEY")
     if not key:
         raise STTError("OPENROUTER_API_KEY is not set (add it to .env).")
-    prompt = PROMPT + (f" The caller probably speaks {LANGUAGES[language_hint]}." if language_hint in LANGUAGES else "")
+    prompt = PROMPT + (f" The recording language selected by the caller is {LANGUAGES[language_hint]}. "
+                       "Use that language's original script. This is transcription, not translation. "
+                       "Do not turn a specialty (such as أسنان) into a person's name."
+                       if language_hint in LANGUAGES else "")
     model = os.getenv("STT_MODEL") or "google/gemini-2.5-flash-lite"
     fallback = os.getenv("STT_FALLBACK_MODEL", "mistralai/voxtral-small-24b-2507").strip()
+    # نموذج fallback الافتراضي لا يعلن دعم العربية؛ لا نحول فشله إلى ترجمة صامتة.
+    if language_hint == "ar" and fallback == "mistralai/voxtral-small-24b-2507":
+        fallback = ""
+    if language_hint == "ar" and model == "mistralai/voxtral-small-24b-2507":
+        raise STTError("The configured transcription model does not support the selected Arabic mode.")
     body = {"temperature": 0, "usage": {"include": True},
             "messages": [{"role": "user", "content": [
                 {"type": "text", "text": prompt},
@@ -172,6 +184,7 @@ def _whisper_local(data: bytes, language_hint: str | None) -> str:
         raise STTError(f"Local transcription failed: {exc}") from None
 
 
+# نقطة STT العامة: تقرأ audio وتختار المزود الحالي مع تمرير language_hint دون ترجمة النص.
 def transcribe(audio: str | Path | bytes, language_hint: str | None = None) -> str:
     """Return the words spoken in `audio` ('' when there is no speech). Raises STTError."""
     data = _read(audio)
