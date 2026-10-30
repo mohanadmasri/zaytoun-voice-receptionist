@@ -16,6 +16,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.runtime import Runtime
 
 from agent.state import AgentState
+from agent.scheduler_node import scheduler_node
 from agent.intake import extract_request, update_state_from_intake
 from agent.dates import normalize_date
 from core.contracts import ClinicGateway
@@ -902,6 +903,7 @@ def build_graph():
     builder.add_node("clarify_provider", clarify_provider_node)
 
     builder.add_node("ready", ready_node)
+    builder.add_node("scheduler", scheduler_node)
 
     builder.add_node("unsupported", unsupported_node)
 
@@ -994,7 +996,8 @@ def build_graph():
 
     builder.add_edge("clarify_provider", END)
 
-    builder.add_edge("ready", END)
+    builder.add_edge("ready", "scheduler")
+    builder.add_edge("scheduler", END)
 
     builder.add_edge("clinic_error", END)
 
