@@ -4,9 +4,12 @@
 # ينظم LangGraph تنفيذ العقد باستخدام AgentState.
 # intake_node تفهم رسالة المريض وتحدث الحالة.
 # normalize_date_node تحصل على تاريخ العيادة عبر Gateway.
+# normalize_time_node تحول نص الوقت إلى حدود بحث باستخدام Python فقط.
 # choose_next تختار المسار المناسب حسب البيانات.
 # build_graph تربط العقد وتحدد ترتيب تنفيذها.
 # لا يوجد حجز فعلي في هذه المرحلة.
+# المدخل حالة المحادثة والرسالة؛ المخرج رد وحالة وموافقة معلقة عند الجاهزية.
+# يستخدم LLM للفهم وMCP للقراءة؛ متابعة الاختيار لا تستدعي أدوات العيادة.
 # ==================================================
 from agent.guardrails import check_guardrails
 from time import perf_counter
@@ -18,10 +21,15 @@ from langgraph.runtime import Runtime
 from agent.state import AgentState
 from agent.intake import extract_request, update_state_from_intake
 from agent.dates import normalize_date
+from agent.times import normalize_time
 from core.contracts import ClinicGateway
 from agent.service_mapping import match_service
 from agent.patient_memory import lookup_returning_patient
 from agent.service_mapping import match_provider
+from agent.scheduler_node import scheduler_node
+from agent.slot_selection import select_slot, extract_time, find_slots_by_id, extract_option_numbers
+from agent.slot_handoff import slot_matches_request
+from actions.approval import prepare_booking_action
 # ==================================================
 # تذكير — Runtime Context
 #
@@ -88,11 +96,20 @@ async def intake_node(state: AgentState) -> AgentState:
     # بدء سجل جديد لاستدعاءات الأدوات في هذه الجولة
     updated_state["tool_calls"] = []
 
-    # إعادة ضبط المرحلة قبل معالجة الطلب الحالي
-    if updated_state.get("language") != "unsupported":
-        updated_state["stage"] = "intake"
-
     return updated_state
+
+
+# تستقبل حالة المحادثة وتعيد حقول الوقت المنظمة للبحث والتحقق من النتائج.
+# تُنفذ في مسار البحث فقط؛ تعيد missing عند غياب الوقت وتميز الغامض دون تخمين.
+# لا تستخدم LLM أو MCP أو API، ولا تغيّر مرحلة خطأ العيادة أو تنشئ حجزًا.
+def normalize_time_node(state: AgentState) -> dict:
+    preference = normalize_time(state.get("time_text"))
+    return {
+        "time_kind": preference["kind"],
+        "requested_time": preference["requested_time"],
+        "time_after": preference["after"],
+        "time_before": preference["before"],
+    }
 
 
 # تحصل على تاريخ العيادة وتحول تاريخ المريض إلى YYYY-MM-DD.
@@ -268,7 +285,7 @@ async def service_mapping_node(
 
 def route_after_intake(
     state: AgentState
-) -> Literal["normal", "safety", "unsupported"]:
+) -> Literal["normal", "safety", "unsupported", "slot_followup"]:
 
     # الطوارئ لها الأولوية القصوى.
     if state.get("safety") == "emergency":
@@ -296,8 +313,54 @@ def route_after_intake(
     ):
         return "safety"
 
+    # نوجّه المتابعة بعد فحوص السلامة، بشرط بقاء المواعيد صالحة.
+    if state.get("proposed_slots") and state.get("stage") in (
+        "slots_proposed", "awaiting_slot_selection", "slot_selected",
+        "awaiting_patient_details", "awaiting_approval",
+    ):
+        return "slot_followup"
+
     # السماح بمتابعة المسار العادي.
     return "normal"
+
+
+# تستقبل حالة المتابعة وتعيد الاختيار أو طلب البيانات أو الموافقة المعلقة.
+# تتحقق من انتماء الاختيار للقائمة ومطابقته للطلب؛ لا تستخدم أدوات خارجية.
+# الاسم والهاتف يكملان الاختيار السابق؛ ذكر رقم خيار أو وقت أو معرّف يعيد فحص الاختيار.
+def slot_followup_node(state: AgentState) -> dict:
+    updates = {}
+    message = state.get("current_message", "")
+    choosing = bool(
+        extract_option_numbers(message) is not None
+        or extract_time(message) is not None
+        or find_slots_by_id(state.get("proposed_slots", []), message)
+        or "SL-" in message.upper()
+    )
+    if choosing or not state.get("selected_slot_id"):
+        updates = select_slot(state, message)
+        if updates.get("stage") != "slot_selected":
+            return {**updates, "pending_action": None}
+
+    # دمج محلي لأن LangGraph يطبّق تحديثات العقدة بعد إرجاعها فقط.
+    selected_state = {**state, **updates}
+    selected = next((slot for slot in selected_state.get("proposed_slots", [])
+                     if slot.get("slot_id") == selected_state.get("selected_slot_id")), None)
+    if selected is None or not slot_matches_request(selected_state, selected):
+        return {"stage": "awaiting_slot_selection", "selected_slot_id": None,
+                "pending_action": None, "reply": "Please choose a matching displayed slot."}
+
+    if not selected_state.get("patient_name") or not selected_state.get("patient_phone"):
+        return {**updates, "stage": "awaiting_patient_details", "pending_action": None,
+                "reply": "Please provide your full name and phone number."}
+
+    try:
+        pending = prepare_booking_action(selected_state)
+    except ValueError:
+        # لا نتجاوز تحقق الموافقة، بما فيه شرط ولي الأمر لمسار الأطفال.
+        return {**updates, "stage": "awaiting_patient_details", "pending_action": None,
+                "reply": "Booking details need verification before approval can be prepared."}
+    return {**updates, "stage": "awaiting_approval", "pending_action": pending,
+            "reply": f"Please review and explicitly approve: {pending['summary']}"}
 
 # ==================================================
 # تذكير — safety_node
@@ -534,7 +597,7 @@ async def provider_mapping_node(
     service_id = state.get("service_id")
     provider_text = state.get("provider_text")
     preferred_id = state.get("provider_id")
-    
+
     # المريض صرح أنه يقبل أي طبيب.
     # لا نقيّد البحث بطبيب محدد.
     if state.get("provider_choice") == "any":
@@ -792,7 +855,7 @@ def clarify_provider_node(state: AgentState) -> dict:
 # 1. تبدأ بفهم رسالة المريض.
 # 2. توجه الرسائل الخطرة إلى safety.
 # 3. تبحث عن المريض إذا كان الطلب عاديا.
-# 4. تعالج التاريخ والخدمة والطبيب بالترتيب.
+# 4. تعالج التاريخ والوقت والخدمة والطبيب بالترتيب.
 # 5. تختار الرد المناسب بعد اكتمال المعالجة.
 #
 # تسجيل Node وحده لا يعني أنها ستُنفذ.
@@ -812,12 +875,14 @@ def build_graph():
     # ==============================================
 
     builder.add_node("intake", intake_node)
+    builder.add_node("slot_followup", slot_followup_node)
 
     builder.add_node("patient_lookup", patient_lookup_node)
 
     builder.add_node("safety", safety_node)
 
     builder.add_node("normalize_date", normalize_date_node)
+    builder.add_node("normalize_time", normalize_time_node)
 
     builder.add_node("service_mapping", service_mapping_node)
 
@@ -828,6 +893,9 @@ def build_graph():
     builder.add_node("clarify_provider", clarify_provider_node)
 
     builder.add_node("ready", ready_node)
+
+    # تسجيل عقدة البحث عن المواعيد بعد اكتمال بيانات الطلب.
+    builder.add_node("scheduler", scheduler_node)
 
     builder.add_node("unsupported", unsupported_node)
 
@@ -852,6 +920,7 @@ def build_graph():
         route_after_intake,
         {
             "normal": "patient_lookup",
+            "slot_followup": "slot_followup",
             "safety": "safety",
             "unsupported": "unsupported",
         },
@@ -867,9 +936,13 @@ def build_graph():
         "normalize_date",
     )
 
-    # بعد التاريخ نحدد الخدمة الرسمية.
+    # بعد التاريخ نحوّل الوقت إلى شروط البحث قبل تحديد الخدمة.
     builder.add_edge(
         "normalize_date",
+        "normalize_time",
+    )
+    builder.add_edge(
+        "normalize_time",
         "service_mapping",
     )
 
@@ -902,6 +975,7 @@ def build_graph():
     # ==============================================
 
     builder.add_edge("safety", END)
+    builder.add_edge("slot_followup", END)
 
     builder.add_edge("unsupported", END)
 
@@ -909,7 +983,11 @@ def build_graph():
 
     builder.add_edge("clarify_provider", END)
 
-    builder.add_edge("ready", END)
+    # بعد تجهيز الطلب نشغّل البحث الحقيقي بدل إنهاء الجولة.
+    builder.add_edge("ready", "scheduler")
+
+    # بعد البحث تنتهي الجولة وتعود المواعيد إلى المستخدم.
+    builder.add_edge("scheduler", END)
 
     builder.add_edge("clinic_error", END)
 
