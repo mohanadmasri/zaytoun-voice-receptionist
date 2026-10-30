@@ -6,6 +6,8 @@
 # الاعتماد على تاريخ العيادة وليس تاريخ الجهاز.
 # دعم التواريخ المباشرة وأيام الأسبوع وأسماء الأشهر.
 # عدم قبول تاريخ قديم أو تاريخ غير صالح.
+# المدخل نص التاريخ وتاريخ العيادة؛ المخرج ISO أو None عند الغموض أو التعارض.
+# لا يستدعي LLM أو MCP؛ Graph يمرر تاريخ العيادة الموثق إلى هذه الدالة.
 # ==================================================
 
 import re
@@ -41,7 +43,55 @@ ENGLISH_MONTHS = {
 }
 
 
-# تحويل التاريخ اعتمادا على تاريخ العيادة.
+# أسماء الأشهر العربية الشائعة؛ المعرف الرقمي لا يعتمد على لغة STT أو لغة الجهاز.
+ARABIC_MONTHS = {
+    "يناير": 1, "كانون الثاني": 1,
+    "فبراير": 2, "شباط": 2,
+    "مارس": 3, "آذار": 3, "اذار": 3,
+    "أبريل": 4, "ابريل": 4, "نيسان": 4,
+    "مايو": 5, "أيار": 5, "ايار": 5,
+    "يونيو": 6, "حزيران": 6,
+    "يوليو": 7, "تموز": 7,
+    "أغسطس": 8, "اغسطس": 8, "آب": 8, "اب": 8,
+    "سبتمبر": 9, "أيلول": 9, "ايلول": 9,
+    "أكتوبر": 10, "اكتوبر": 10, "تشرين الأول": 10, "تشرين الاول": 10,
+    "نوفمبر": 11, "تشرين الثاني": 11,
+    "ديسمبر": 12, "كانون الأول": 12, "كانون الاول": 12,
+}
+
+ARABIC_WEEKDAYS = {
+    "الاثنين": 0, "الإثنين": 0, "الاثنان": 0,
+    "الثلاثاء": 1, "الأربعاء": 2, "الاربعاء": 2,
+    "الخميس": 3, "الجمعة": 4, "السبت": 5, "الأحد": 6, "الاحد": 6,
+}
+
+
+# تستقبل النص المنظف وتاريخ العيادة، وتعيد تاريخًا عربيًا محددًا أو None.
+# السنة الناقصة تؤخذ من سنة العيادة؛ لا نقفز لسنة أخرى ولا نتجاهل تعارض يوم الأسبوع.
+# مثال: يوم الاثنين 2 نوفمبر يختلف عن الاثنين وحدها؛ التاريخ المحدد له الأولوية.
+def parse_arabic_calendar_date(text: str, today: date) -> str | None:
+    month_names = "|".join(re.escape(name) for name in sorted(ARABIC_MONTHS, key=len, reverse=True))
+    weekdays = "|".join(re.escape(name) for name in sorted(ARABIC_WEEKDAYS, key=len, reverse=True))
+    match = re.fullmatch(
+        rf"(?:يوم\s+)?(?:(?P<weekday>{weekdays})[,،]?\s+)?"
+        rf"(?P<day>\d{{1,2}})\s+(?P<month>{month_names})(?:[,،]?\s+(?P<year>\d{{4}}))?",
+        text,
+    )
+    if match is None:
+        return None
+    try:
+        parsed_date = date(int(match.group("year") or today.year),
+                           ARABIC_MONTHS[match.group("month")], int(match.group("day")))
+    except ValueError:
+        return None
+    weekday = match.group("weekday")
+    if parsed_date < today or (weekday and parsed_date.weekday() != ARABIC_WEEKDAYS[weekday]):
+        return None
+    return parsed_date.isoformat()
+
+
+# تستقبل date_text الخام وclinic_today بصيغة ISO وتعيد تاريخًا صالحًا أو None.
+# توحد الأرقام أولًا، ثم تفحص التاريخ العربي المحدد قبل تفسير يوم أسبوع منفرد.
 def normalize_date(
     date_text: str | None,
     clinic_today: str,
@@ -64,6 +114,10 @@ def normalize_date(
         "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹",
         "01234567890123456789",
     ))
+
+    arabic_date = parse_arabic_calendar_date(text, today)
+    if arabic_date is not None:
+        return arabic_date
 
     # اليوم والغد وبعد الغد.
     if text in ("today", "اليوم"):
@@ -159,18 +213,7 @@ def normalize_date(
     }
 
     # أسماء أيام الأسبوع بالعربية.
-    arabic_days = {
-        "الاثنين": 0,
-        "الإثنين": 0,
-        "الثلاثاء": 1,
-        "الأربعاء": 2,
-        "الاربعاء": 2,
-        "الخميس": 3,
-        "الجمعة": 4,
-        "السبت": 5,
-        "الأحد": 6,
-        "الاحد": 6,
-    }
+    arabic_days = ARABIC_WEEKDAYS
 
     # إزالة الكلمات الإضافية حول أيام الأسبوع.
     day_text = re.sub(

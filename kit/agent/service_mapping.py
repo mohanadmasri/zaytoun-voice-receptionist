@@ -6,6 +6,7 @@
 # المقارنة تعتمد على الخدمات الحقيقية من نظام العيادة.
 # دعم العربية والإنجليزية واختلاف علامات الترقيم.
 # عدم اختيار خدمة عند وجود أكثر من تطابق.
+# المدخل نص الخدمة وقائمتها الرسمية؛ المخرج معرف موثق أو None. لا توجد اتصالات خارجية.
 # ==================================================
 
 import re
@@ -36,13 +37,20 @@ def normalize_service_text(text: str) -> str:
     return " ".join(re.findall(r"\w+", text))
 
 
-# معرفة الخدمة الرسمية من كلام المريض.
+# توحد أسنان/الأسنان بعد إزالة الهمزات، داخل مقارنة الخدمات فقط.
+# لا تغير normalize_service_text المشتركة مع مطابقة أسماء الأطباء.
+def normalize_service_name(text: str) -> str:
+    return re.sub(r"\bالاسنان\b", "اسنان", normalize_service_text(text))
+
+
+# تستقبل كلام المريض وقائمة الخدمات الرسمية، وتعيد معرف خدمة وحيدة دون تخمين.
+# يبقى تعدد التطابقات سببًا لإرجاع None وطلب توضيح.
 def match_service(
     service_text: str,
     services: list[dict[str, Any]],
 ) -> str | None:
 
-    requested = normalize_service_text(service_text)
+    requested = normalize_service_name(service_text)
 
     if not requested:
         return None
@@ -72,7 +80,7 @@ def match_service(
             if not isinstance(name, str):
                 continue
 
-            official = normalize_service_text(name)
+            official = normalize_service_name(name)
 
             if not official:
                 continue

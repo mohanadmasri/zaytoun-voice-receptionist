@@ -27,11 +27,46 @@ def format_slot_options(slots: list[dict]) -> str:
     )
 
 
+# تحول كلمات الأرقام في عبارة اختيار فقط إلى أرقام، وتعيد نسخة للتحليل المحلي.
+# لا تغير transcript أو current_message، ولا تحول أرقام الهاتف أو الوقت داخل جمل أخرى.
+# تشمل قائمة الأرقام المتعارضة أيضًا: option two or three تصبح option 2 or 3 ليتم رفضها.
+def normalize_spoken_options(message: str) -> str:
+    words = {
+        "zero": 0, "one": 1, "first": 1, "two": 2, "second": 2,
+        "three": 3, "third": 3, "four": 4, "fourth": 4, "five": 5, "fifth": 5,
+        "six": 6, "sixth": 6, "seven": 7, "seventh": 7, "eight": 8, "eighth": 8,
+        "nine": 9, "ninth": 9, "ten": 10, "tenth": 10,
+        "صفر": 0, "واحد": 1, "الأول": 1, "الاول": 1, "الأولى": 1, "الاولى": 1,
+        "اثنين": 2, "إثنين": 2, "اتنين": 2, "الثاني": 2, "الثانية": 2, "التاني": 2,
+        "ثلاثة": 3, "ثلاث": 3, "الثالث": 3, "الثالثة": 3,
+        "أربعة": 4, "اربعة": 4, "الرابع": 4, "الرابعة": 4,
+        "خمسة": 5, "الخامس": 5, "الخامسة": 5, "ستة": 6, "السادس": 6,
+        "سبعة": 7, "السابع": 7, "ثمانية": 8, "الثامن": 8,
+        "تسعة": 9, "التاسع": 9, "عشرة": 10, "العاشر": 10,
+    }
+    text = re.sub(r"[\u064b-\u065f\u0670]", "", message)
+    word_pattern = "|".join(re.escape(word) for word in sorted(words, key=len, reverse=True))
+    item = rf"(?:[+-]?\d+(?:\.\d+)?|(?:{word_pattern}))(?!\w)"
+    items = rf"{item}(?:\s*(?:,|،|and\b|or\b|و|أو)\s*{item})*"
+    prefix = r"(?:options?|choices?|choose|select|pick|الخيار|خيار|أختار|اختار)\s*(?:number\s*|رقم\s*)?"
+
+    # يستبدل الكلمات داخل مقطع الاختيار المطابق فقط، مع إبقاء الروابط لكشف التعارض.
+    def replace_words(match):
+        return re.sub(rf"(?<!\w)(?:{word_pattern})(?!\w)",
+                      lambda token: str(words[token.group().casefold()]), match.group(), flags=re.IGNORECASE)
+
+    if re.fullmatch(rf"\s*{items}\s*[.!؟?]?\s*", text, re.IGNORECASE):
+        text = re.sub(rf"{items}", replace_words, text, flags=re.IGNORECASE)
+    else:
+        text = re.sub(rf"(?<!\w){prefix}{items}", replace_words, text, flags=re.IGNORECASE)
+    return text
+
+
 # تستقبل رسالة وتعيد الأرقام المصرح بها؛ None تعني عدم وجود اختيار رقمي.
 # القائمة الفارغة تعني صيغة رقمية غير صالحة. لا نفسر الهاتف أو ساعة الموعد كرقم خيار.
 # تدعم الأرقام العربية والفارسية؛ التحقق من الحدود يتم مقابل القائمة الحالية فقط.
 def extract_option_numbers(message: str) -> list[int] | None:
-    text = message.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789"))
+    text = normalize_spoken_options(message).translate(str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789"))
     number_list = r"[+-]?\d+(?:\.\d+)?(?:\s*(?:,|،|and\b|or\b|و|أو)\s*[+-]?\d+(?:\.\d+)?)*"
     bare = re.fullmatch(rf"\s*({number_list})\s*[.!]?\s*", text, re.IGNORECASE)
     labelled = list(re.finditer(
@@ -45,6 +80,10 @@ def extract_option_numbers(message: str) -> list[int] | None:
         if re.fullmatch(r"[+]?\d{7,}", values[0]):
             return None
     elif labelled:
+        # لا نتجاهل بديلًا لم نفهم رقمه مثل option two or twenty ونختار الأول صامتًا.
+        if any(re.match(r"\s*(?:or\b|أو)(?:\s|$)", text[match.end():], re.IGNORECASE)
+               for match in labelled):
+            return []
         values = [match.group(1) for match in labelled]
     elif re.search(r"\b(?:options?|choices?)\b|الخيار", text, re.IGNORECASE):
         return []
