@@ -1,3 +1,6 @@
+# واجهة Gradio الموجودة لعرض المحادثة والتسجيل والنص والخيارات وحالة الموافقة.
+# المدخل نص أو تسجيل ميكروفون WAV؛ المخرج رد API مع transcript وتشغيل صوت المتصفح.
+# لا تتصل مباشرة بـLLM أو MCP؛ ترسل إلى FastAPI، وتنفذ الموافقة بزر مستقل فقط.
 """Gradio client for the receptionist API contract: POST /api/chat, /api/voice and /api/approve.
 
 Start your app first (APP_URL, default http://localhost:8000), then:
@@ -40,21 +43,28 @@ SPEAK_JS = """(speech) => {
 }"""
 
 
+# ترسل الطلب إلى FastAPI وتحتفظ برد الأخطاء الصوتية المنظم والموافقة الموجودة فيه.
+# أخطاء النقل تبقى رسائل واضحة؛ لا تعيد إرسال الطلب تلقائيًا لتجنب تكرار المعالجة.
 def post(path: str, **kwargs) -> dict:
     try:
         r = httpx.post(APP_URL + path, timeout=TIMEOUT, **kwargs)
         data = r.json()
     except Exception as exc:  # noqa: BLE001
         return {"reply": f"Cannot reach your app at {APP_URL}{path} ({exc.__class__.__name__})."}
+    if isinstance(data, dict) and isinstance(data.get("reply"), str):
+        return data
     if r.status_code >= 400 or not isinstance(data, dict):
         return {"reply": f"Your app answered HTTP {r.status_code}: {json.dumps(data)[:300]}"}
     return data
 
 
+# تربط جميع رسائل النص والصوت والموافقة بنفس جلسة المتصفح بدل إنشاء جلسة لكل تسجيل.
 def session_id(request: gr.Request) -> str:
     return "ui-" + (request.session_hash or "local")
 
 
+# تحول رد العقد إلى حقول الواجهة، وتحافظ على الخيارات المرقمة داخل reply كما وردت.
+# حقول الصوت الفارغة تطلب نطق المتصفح؛ زر Replay يسمح بتشغيله بتفاعل المستخدم.
 def show(data: dict, history: list) -> tuple:
     """Map one ChatResponse onto the UI components."""
     history = history + [{"role": "assistant", "content": data.get("reply") or "(empty reply)"}]
@@ -74,6 +84,7 @@ def show(data: dict, history: list) -> tuple:
             gr.update(visible=bool(pending)), gr.update(visible=bool(pending)), speech)
 
 
+# ترسل نصًا عبر /api/chat بنفس جلسة الميكروفون، ليبقى الإدخال الكتابي بديلًا دائمًا.
 def send_text(message: str, history: list, request: gr.Request):
     if not (message or "").strip():
         raise gr.Error("Type a message first.")
@@ -82,6 +93,7 @@ def send_text(message: str, history: list, request: gr.Request):
     return show(data, history) + ("",)
 
 
+# ترفع التسجيل إلى /api/voice؛ لا تفرغه محليًا ولا تفقد session_id بين الأدوار.
 def send_voice(audio_path: str | None, history: list, request: gr.Request):
     if not audio_path:
         raise gr.Error("Record or upload a recording first.")
@@ -92,6 +104,7 @@ def send_voice(audio_path: str | None, history: list, request: gr.Request):
     return show(data, history + [{"role": "user", "content": f"(voice) {heard}"}])
 
 
+# ترسل قرار الزر ومعرف العملية فقط؛ تفاصيل الحجز تُقرأ من الخادم لا من المتصفح.
 def decide(pending: dict | None, history: list, request: gr.Request, approved: bool):
     if not pending:
         raise gr.Error("Nothing is waiting for approval.")
@@ -101,10 +114,12 @@ def decide(pending: dict | None, history: list, request: gr.Request, approved: b
     return show(data, history)
 
 
+# يمرر زر الموافقة الصريحة؛ تسجيل كلمة yes وحده لا يستدعي هذه الدالة.
 def approve(pending, history, request: gr.Request):
     return decide(pending, history, request, True)
 
 
+# يمرر الرفض لنفس العملية المعلقة دون تنفيذ حجز.
 def reject(pending, history, request: gr.Request):
     return decide(pending, history, request, False)
 
@@ -119,11 +134,12 @@ with gr.Blocks(title="Clinic receptionist") as demo:
             with gr.Row():
                 msg = gr.Textbox(placeholder="Type a message and press Enter", show_label=False, scale=5)
                 send = gr.Button("Send", variant="primary", scale=1)
-            mic = gr.Audio(sources=["microphone", "upload"], type="filepath",
+            mic = gr.Audio(sources=["microphone", "upload"], type="filepath", format="wav",
                            label="Speak: record (sent when you stop) or upload a WAV/MP3 file")
         with gr.Column(scale=2):
             transcript = gr.Textbox(label="Transcript (what your app heard)", interactive=False)
             status = gr.Markdown("**State:** -")
+            replay = gr.Button("Replay reply / إعادة سماع الرد")
             pending_md = gr.Markdown()
             with gr.Row():
                 approve_btn = gr.Button("Approve", variant="primary", visible=False)
@@ -132,6 +148,7 @@ with gr.Blocks(title="Clinic receptionist") as demo:
             tools = gr.Markdown("_none_")
 
     outs = [chat, transcript, status, tools, pending_md, pending_state, approve_btn, reject_btn, speech]
+    replay.click(None, [speech], None, js=SPEAK_JS)
     for event in (msg.submit, send.click):
         event(send_text, [msg, chat], outs + [msg]).then(None, [speech], None, js=SPEAK_JS)
     for event in (mic.stop_recording, mic.upload):
