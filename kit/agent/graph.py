@@ -4,9 +4,12 @@
 # ينظم LangGraph تنفيذ العقد باستخدام AgentState.
 # intake_node تفهم رسالة المريض وتحدث الحالة.
 # normalize_date_node تحصل على تاريخ العيادة عبر Gateway.
+# normalize_time_node تحول نص الوقت إلى حدود بحث باستخدام Python فقط.
 # choose_next تختار المسار المناسب حسب البيانات.
 # build_graph تربط العقد وتحدد ترتيب تنفيذها.
 # لا يوجد حجز فعلي في هذه المرحلة.
+# المدخل حالة المحادثة والرسالة؛ المخرج رد وحالة وموافقة معلقة عند الجاهزية.
+# يستخدم LLM للفهم وMCP للقراءة؛ متابعة الاختيار لا تستدعي أدوات العيادة.
 # ==================================================
 from agent.guardrails import check_guardrails
 from time import perf_counter
@@ -16,14 +19,18 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.runtime import Runtime
 
 from agent.state import AgentState
-from agent.scheduler_node import scheduler_node
 from agent.intake import extract_request, update_state_from_intake
 from agent.dates import normalize_date
+from agent.times import normalize_time
 from core.contracts import ClinicGateway
 from agent.service_mapping import match_service
 from agent.patient_memory import lookup_returning_patient
 from agent.service_mapping import match_provider
-from agent.times import normalize_time# ==================================================
+from agent.scheduler_node import scheduler_node
+from agent.slot_selection import select_slot, extract_time, find_slots_by_id
+from agent.slot_handoff import slot_matches_request
+from actions.approval import prepare_booking_action
+# ==================================================
 # تذكير — Runtime Context
 #
 # المشكلة: بعض Nodes تحتاج أدوات خارجية مثل ClinicGateway.
@@ -89,11 +96,20 @@ async def intake_node(state: AgentState) -> AgentState:
     # بدء سجل جديد لاستدعاءات الأدوات في هذه الجولة
     updated_state["tool_calls"] = []
 
-    # إعادة ضبط المرحلة قبل معالجة الطلب الحالي
-    if updated_state.get("language") != "unsupported":
-        updated_state["stage"] = "intake"
-
     return updated_state
+
+
+# تستقبل حالة المحادثة وتعيد حقول الوقت المنظمة للبحث والتحقق من النتائج.
+# تُنفذ في مسار البحث فقط؛ تعيد missing عند غياب الوقت وتميز الغامض دون تخمين.
+# لا تستخدم LLM أو MCP أو API، ولا تغيّر مرحلة خطأ العيادة أو تنشئ حجزًا.
+def normalize_time_node(state: AgentState) -> dict:
+    preference = normalize_time(state.get("time_text"))
+    return {
+        "time_kind": preference["kind"],
+        "requested_time": preference["requested_time"],
+        "time_after": preference["after"],
+        "time_before": preference["before"],
+    }
 
 
 # تحصل على تاريخ العيادة وتحول تاريخ المريض إلى YYYY-MM-DD.
@@ -162,32 +178,6 @@ async def normalize_date_node(
     return {
         "requested_date": resolved_date,
         "tool_calls": calls,
-    }
-
-# ==================================================
-# تذكير — normalize_time_node
-#
-# 1. تقرأ الوقت الذي استخرجه Intake.
-# 2. تستدعي normalize_time من times.py.
-# 3. تحفظ الوقت بصيغة منظمة داخل AgentState.
-#
-# لا تستدعي MCP ولا تحجز موعدا.
-# ==================================================
-
-def normalize_time_node(state: AgentState) -> dict:
-
-    # قراءة نص الوقت الأصلي.
-    time_text = state.get("time_text")
-
-    # تحويله إلى نتيجة منظمة.
-    result = normalize_time(time_text)
-
-    # حفظ النتيجة لاستخدامها في Scheduler.
-    return {
-        "time_kind": result["kind"],
-        "requested_time": result["requested_time"],
-        "time_after": result["after"],
-        "time_before": result["before"],
     }
 
 # ==================================================
@@ -295,7 +285,7 @@ async def service_mapping_node(
 
 def route_after_intake(
     state: AgentState
-) -> Literal["normal", "safety", "unsupported"]:
+) -> Literal["normal", "safety", "unsupported", "slot_followup"]:
 
     # الطوارئ لها الأولوية القصوى.
     if state.get("safety") == "emergency":
@@ -323,8 +313,52 @@ def route_after_intake(
     ):
         return "safety"
 
+    # نوجّه المتابعة بعد فحوص السلامة، بشرط بقاء المواعيد صالحة.
+    if state.get("proposed_slots") and state.get("stage") in (
+        "slots_proposed", "awaiting_slot_selection", "slot_selected",
+        "awaiting_patient_details", "awaiting_approval",
+    ):
+        return "slot_followup"
+
     # السماح بمتابعة المسار العادي.
     return "normal"
+
+
+# تستقبل حالة المتابعة وتعيد الاختيار أو طلب البيانات أو الموافقة المعلقة.
+# تتحقق من انتماء الاختيار للقائمة ومطابقته للطلب؛ لا تستخدم أدوات خارجية.
+# الاسم والهاتف يكملان الاختيار السابق؛ ذكر وقت أو معرّف يعيد فحص الاختيار.
+def slot_followup_node(state: AgentState) -> dict:
+    updates = {}
+    message = state.get("current_message", "")
+    choosing = bool(
+        extract_time(message) is not None
+        or find_slots_by_id(state.get("proposed_slots", []), message)
+    )
+    if choosing or not state.get("selected_slot_id"):
+        updates = select_slot(state, message)
+        if updates.get("stage") != "slot_selected":
+            return {**updates, "pending_action": None}
+
+    # دمج محلي لأن LangGraph يطبّق تحديثات العقدة بعد إرجاعها فقط.
+    selected_state = {**state, **updates}
+    selected = next((slot for slot in selected_state.get("proposed_slots", [])
+                     if slot.get("slot_id") == selected_state.get("selected_slot_id")), None)
+    if selected is None or not slot_matches_request(selected_state, selected):
+        return {"stage": "awaiting_slot_selection", "selected_slot_id": None,
+                "pending_action": None, "reply": "Please choose a matching displayed slot."}
+
+    if not selected_state.get("patient_name") or not selected_state.get("patient_phone"):
+        return {**updates, "stage": "awaiting_patient_details", "pending_action": None,
+                "reply": "Please provide your full name and phone number."}
+
+    try:
+        pending = prepare_booking_action(selected_state)
+    except ValueError:
+        # لا نتجاوز تحقق الموافقة، بما فيه شرط ولي الأمر لمسار الأطفال.
+        return {**updates, "stage": "awaiting_patient_details", "pending_action": None,
+                "reply": "Booking details need verification before approval can be prepared."}
+    return {**updates, "stage": "awaiting_approval", "pending_action": pending,
+            "reply": f"Please review and explicitly approve: {pending['summary']}"}
 
 # ==================================================
 # تذكير — safety_node
@@ -655,18 +689,16 @@ async def provider_mapping_node(
     }
 
 
-
 # ==================================================
 # تذكير — choose_next
 #
-# تفحص حالة المحادثة وتحدد الخطوة التالية:
+# تفحص AgentState وتحدد اتجاه التنفيذ.
 #
-# 1. رفض اللغة غير المدعومة.
-# 2. التعامل مع فشل أدوات العيادة.
-# 3. طلب توضيح الطبيب غير المعروف.
-# 4. طلب بيانات الحجز الناقصة.
-# 5. طلب توضيح الوقت الغامض (جديد).
-# 6. متابعة الحجز إذا كانت البيانات جاهزة.
+# 1. رفض اللغات غير المدعومة.
+# 2. إيقاف التنفيذ عند فشل أدوات العيادة.
+# 3. طلب توضيح إذا تعذر التحقق من الطبيب.
+# 4. طلب معلومات الحجز الناقصة.
+# 5. السماح بالمتابعة إذا اكتملت البيانات.
 # ==================================================
 
 def choose_next(
@@ -676,7 +708,6 @@ def choose_next(
     "clinic_error",
     "clarify",
     "clarify_provider",
-    "clarify_time",
     "ready",
 ]:
 
@@ -684,7 +715,8 @@ def choose_next(
     if state.get("language") == "unsupported":
         return "unsupported"
 
-    # 2. عدم الاستمرار عند فشل أدوات العيادة.
+    # 2. عدم الاستمرار عند فشل معلومات العيادة
+    # أو فشل التحقق من بيانات الأطباء.
     if state.get("stage") in (
         "clinic_unavailable",
         "services_unavailable",
@@ -692,11 +724,13 @@ def choose_next(
     ):
         return "clinic_error"
 
-    # 3. المريض طلب طبيبا لم نتمكن من التحقق منه.
+    # 3. المريض طلب طبيبا، لكننا لم نتمكن
+    # من التحقق من اسمه أو ملاءمته للخدمة.
     if state.get("stage") == "provider_unverified":
         return "clarify_provider"
 
-    # 4. التحقق من وجود الخدمة والتاريخ المطلوبين.
+    # 4. طلب المعلومات الناقصة أو التاريخ غير المفهوم.
+    # لا نتابع دون خدمة رسمية وتاريخ واضح.
     if (
         not state.get("service_text")
         or not state.get("requested_date")
@@ -704,28 +738,8 @@ def choose_next(
     ):
         return "clarify"
 
-    # ==========================================
-    # 5. التعديل الجديد — التحقق من الوقت.
-    #
-    # ambiguous:
-    # مثل 4:30 دون تحديد صباحا أو مساء.
-    #
-    # unrecognized:
-    # المريض ذكر وقتا لم نستطع فهمه.
-    #
-    # في الحالتين نطلب توضيحا ولا نخمن.
-    # ==========================================
-
-    if state.get("time_kind") in (
-        "ambiguous",
-        "unrecognized",
-    ):
-        return "clarify_time"
-
-    # 6. جميع المعلومات الضرورية جاهزة.
-    # يمكن للـScheduler البحث عن المواعيد.
+    # 5. الخدمة والتاريخ موجودان، ويمكن استكمال الحجز.
     return "ready"
-
 
 # تسأل عن أول معلومة ناقصة.
 def clarify_node(state: AgentState) -> dict:
@@ -758,30 +772,6 @@ def clarify_node(state: AgentState) -> dict:
         "stage": "awaiting_details",
     }
 
-
-# ==================================================
-# تذكير — clarify_time_node
-#
-# لا نختار ساعة عشوائية عندما يكون
-# كلام المريض عن الوقت غير واضح.
-# ==================================================
-
-def clarify_time_node(state: AgentState) -> dict:
-
-    is_arabic = state.get("language") == "ar"
-
-    reply = (
-        "هل تقصد صباحا أم مساء؟ "
-        "يرجى توضيح الوقت الذي يناسبك."
-        if is_arabic
-        else "Could you clarify the time you prefer? "
-             "For example, do you mean AM or PM?"
-    )
-
-    return {
-        "reply": reply,
-        "stage": "awaiting_time_clarification",
-    }
 
 # تحدد أن الخدمة والتاريخ جاهزان للمرحلة التالية.
 def ready_node(state: AgentState) -> dict:
@@ -863,7 +853,7 @@ def clarify_provider_node(state: AgentState) -> dict:
 # 1. تبدأ بفهم رسالة المريض.
 # 2. توجه الرسائل الخطرة إلى safety.
 # 3. تبحث عن المريض إذا كان الطلب عاديا.
-# 4. تعالج التاريخ والخدمة والطبيب بالترتيب.
+# 4. تعالج التاريخ والوقت والخدمة والطبيب بالترتيب.
 # 5. تختار الرد المناسب بعد اكتمال المعالجة.
 #
 # تسجيل Node وحده لا يعني أنها ستُنفذ.
@@ -883,13 +873,13 @@ def build_graph():
     # ==============================================
 
     builder.add_node("intake", intake_node)
+    builder.add_node("slot_followup", slot_followup_node)
 
     builder.add_node("patient_lookup", patient_lookup_node)
 
     builder.add_node("safety", safety_node)
 
-    builder.add_node("normalize_date", normalize_date_node) 
-
+    builder.add_node("normalize_date", normalize_date_node)
     builder.add_node("normalize_time", normalize_time_node)
 
     builder.add_node("service_mapping", service_mapping_node)
@@ -898,11 +888,11 @@ def build_graph():
 
     builder.add_node("clarify", clarify_node)
 
-    builder.add_node("clarify_time", clarify_time_node)
-
     builder.add_node("clarify_provider", clarify_provider_node)
 
     builder.add_node("ready", ready_node)
+
+    # تسجيل عقدة البحث عن المواعيد بعد اكتمال بيانات الطلب.
     builder.add_node("scheduler", scheduler_node)
 
     builder.add_node("unsupported", unsupported_node)
@@ -928,6 +918,7 @@ def build_graph():
         route_after_intake,
         {
             "normal": "patient_lookup",
+            "slot_followup": "slot_followup",
             "safety": "safety",
             "unsupported": "unsupported",
         },
@@ -943,19 +934,15 @@ def build_graph():
         "normalize_date",
     )
 
-    
-    # بعد معالجة التاريخ، نعالج الوقت.
+    # بعد التاريخ نحوّل الوقت إلى شروط البحث قبل تحديد الخدمة.
     builder.add_edge(
         "normalize_date",
         "normalize_time",
     )
-
-    # بعد تحليل الوقت، نحدد الخدمة الرسمية.
     builder.add_edge(
         "normalize_time",
         "service_mapping",
     )
-
 
     # بعد الخدمة نتحقق من الطبيب المطلوب.
     builder.add_edge(
@@ -974,7 +961,6 @@ def build_graph():
         choose_next,
         {
             "clarify": "clarify",
-            "clarify_time": "clarify_time",
             "clarify_provider": "clarify_provider",
             "ready": "ready",
             "unsupported": "unsupported",
@@ -987,16 +973,18 @@ def build_graph():
     # ==============================================
 
     builder.add_edge("safety", END)
+    builder.add_edge("slot_followup", END)
 
     builder.add_edge("unsupported", END)
 
     builder.add_edge("clarify", END)
 
-    builder.add_edge("clarify_time", END)
-
     builder.add_edge("clarify_provider", END)
 
+    # بعد تجهيز الطلب نشغّل البحث الحقيقي بدل إنهاء الجولة.
     builder.add_edge("ready", "scheduler")
+
+    # بعد البحث تنتهي الجولة وتعود المواعيد إلى المستخدم.
     builder.add_edge("scheduler", END)
 
     builder.add_edge("clinic_error", END)
