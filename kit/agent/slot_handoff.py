@@ -1,25 +1,8 @@
-# ==================================================
-# تذكير — slot_handoff.py
-#
-# وظيفة الملف:
-# حلقة وصل بين Intake Agent وScheduler.
-# يجهز بيانات البحث عن المواعيد ويتحقق من أن
-# الموعد المقترح يطابق طلب المريض.
-#
-# 1. build_find_slots_args:
-# تحول بيانات AgentState إلى معاملات جاهزة
-# لأداة find_slots، مثل التاريخ والوقت والطبيب.
-# وترفض تجهيز البحث إذا كانت البيانات غير واضحة.
-#
-# 2. slot_matches_request:
-# تفحص الموعد المقترح وتتأكد من مطابقته
-# للخدمة والتاريخ والوقت والطبيب المطلوب.
-# تعيد True عند التطابق وFalse عند الاختلاف.
-#
-# ملاحظة:
-# الملف لا يبحث عن المواعيد ولا ينفذ الحجوزات.
-# البحث الفعلي مسؤولية Scheduler.
-# ==================================================
+
+# slot_handoff.py
+# هذا الملف يربط بيانات Intake بمتطلبات Scheduler.
+# يجهز معاملات البحث ويتحقق من مطابقة الموعد.
+# لا يتصل بالعيادة ولا ينشئ أي حجز.
 
 import re
 from datetime import date
@@ -27,12 +10,12 @@ from datetime import date
 from agent.state import AgentState
 
 
-# تحويل HH:MM إلى عدد الدقائق منذ منتصف الليل.
+# تحويل الوقت إلى عدد دقائق منذ منتصف الليل.
 def _minutes(value: str) -> int:
 
     if not isinstance(value, str) or not re.fullmatch(
         r"(?:[01]\d|2[0-3]):[0-5]\d",
-        value
+        value,
     ):
         raise ValueError("Invalid time format")
 
@@ -40,13 +23,13 @@ def _minutes(value: str) -> int:
     return hour * 60 + minute
 
 
-# تجهيز معاملات find_slots.
+# تحويل بيانات المريض إلى معاملات find_slots.
 def build_find_slots_args(
     state: AgentState,
-    limit: int = 8
+    limit: int = 8,
 ) -> dict:
 
-    # لا نبحث قبل اكتمال مرحلة Intake.
+    # لا نبحث قبل جاهزية Intake.
     if state.get("stage") != "needs_slot_lookup":
         raise ValueError("Intake is not ready")
 
@@ -56,31 +39,26 @@ def build_find_slots_args(
     if not service_id or not requested_date:
         raise ValueError("Service and date are required")
 
-    # التأكد من صحة صيغة التاريخ.
+    # التحقق من تنسيق التاريخ.
     date.fromisoformat(requested_date)
 
     if not 1 <= limit <= 50:
         raise ValueError("Invalid slot limit")
 
     kind = state.get("time_kind", "missing")
-
     after = None
     before = None
 
-    # المريض طلب ساعة محددة.
+    # عند وجود وقت محدد نحصر البحث بدقيقة واحدة.
     if kind == "exact":
-
         exact = state.get("requested_time")
 
         if not exact:
             raise ValueError("Exact time is missing")
 
         minute = _minutes(exact)
-
         after = exact
 
-        # before حد حصري.
-        # دقيقة واحدة تضمن البحث عن الساعة نفسها فقط.
         if minute < 1439:
             next_minute = minute + 1
             before = (
@@ -88,29 +66,35 @@ def build_find_slots_args(
                 f"{next_minute % 60:02d}"
             )
 
-    # المريض طلب فترة، مثل الصباح.
+    # دعم فترة بحدين أو بحد واحد فقط.
     elif kind == "window":
-
         after = state.get("time_after")
         before = state.get("time_before")
 
-        if not after or not before:
+        if after is None and before is None:
             raise ValueError("Time window is incomplete")
 
-        if _minutes(after) >= _minutes(before):
-            raise ValueError("Invalid time window")
+        if after is not None:
+            _minutes(after)
 
-    # المريض يقبل أي وقت متاح.
+        if before is not None:
+            _minutes(before)
+
+        # التأكد من أن البداية تسبق النهاية.
+        if after is not None and before is not None:
+            if _minutes(after) >= _minutes(before):
+                raise ValueError("Invalid time window")
+
+    # إذا لم يحدد المريض وقتا نبحث دون قيود زمنية.
     elif kind == "missing":
         pass
 
-    # لا نخمن الوقت الغامض.
+    # منع البحث عندما يكون الوقت غامضا.
     else:
         raise ValueError("Time clarification is required")
 
-    # في وضع any يجب عدم تقييد الطبيب.
+    # قراءة تفضيل الطبيب.
     provider_choice = state.get("provider_choice", "auto")
-
     provider_id = state.get("provider_id")
 
     if provider_choice == "any":
@@ -119,6 +103,7 @@ def build_find_slots_args(
     elif provider_choice == "specific" and not provider_id:
         raise ValueError("Requested provider is not verified")
 
+    # إعادة المعاملات التي يحتاجها MCP.
     return {
         "service_id": service_id,
         "date_from": requested_date,
@@ -130,62 +115,74 @@ def build_find_slots_args(
     }
 
 
-# التأكد من مطابقة الموعد لطلب المريض.
+# التحقق من مطابقة موعد معين لطلب المريض.
 def slot_matches_request(
     state: AgentState,
-    slot: dict
+    slot: dict,
 ) -> bool:
 
-    # لا نقبل موعدا غير موثق بالبيانات الأساسية.
+    # التحقق من شكل الموعد ومعرفه.
     if not isinstance(slot, dict):
         return False
 
     if not slot.get("slot_id"):
         return False
 
-        # تذكير:
-    # نظام العيادة يضع service_id في نتيجة البحث العامة،
-    # وليس بالضرورة داخل كل slot.
+    # لا يمكن التحقق دون خدمة رسمية.
     if not state.get("service_id"):
         return False
 
-    # إذا كان معرف الخدمة موجودا في الموعد، نتحقق منه.
+    # الخدمة قد تكون موجودة في نتيجة البحث العامة.
     if (
         slot.get("service_id") is not None
         and slot["service_id"] != state["service_id"]
     ):
         return False
 
+    # التحقق من التاريخ.
     if slot.get("date") != state.get("requested_date"):
         return False
 
-    # التحقق من الطبيب عند وجود اختيار محدد.
+    # التحقق من الطبيب المطلوب.
     if state.get("provider_choice") != "any":
         provider_id = state.get("provider_id")
 
         if provider_id and slot.get("provider_id") != provider_id:
             return False
 
-    # التحقق من وقت الموعد.
-    start = slot.get("start")
-
+    # قراءة وقت الموعد والتحقق من تنسيقه.
     try:
-        start_minutes = _minutes(start)
-    except ValueError:
+        start_minutes = _minutes(slot.get("start"))
+    except (ValueError, TypeError):
         return False
 
     kind = state.get("time_kind", "missing")
 
+    # مطابقة ساعة محددة.
     if kind == "exact":
-        return start == state.get("requested_time")
+        return slot.get("start") == state.get("requested_time")
 
+    # مطابقة فترة زمنية، سواء بحد واحد أو حدين.
     if kind == "window":
-        try:
-            after = _minutes(state["time_after"])
-            before = _minutes(state["time_before"])
-        except (ValueError, KeyError, TypeError):
+        after = state.get("time_after")
+        before = state.get("time_before")
+
+        if after is None and before is None:
             return False
 
-        return after <= start_minutes < before
+        try:
+            if after is not None:
+                if start_minutes < _minutes(after):
+                    return False
 
+            if before is not None:
+                if start_minutes >= _minutes(before):
+                    return False
+
+        except (ValueError, TypeError):
+            return False
+
+        return True
+
+    # قبول أي وقت فقط عندما لا يوجد تفضيل.
     return kind == "missing"

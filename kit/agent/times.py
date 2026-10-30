@@ -1,42 +1,34 @@
 
-# ==================================================
-# تذكير — times.py
-#
-# الهدف: فهم الوقت الذي يذكره المريض.
-#
-# exact      → ساعة محددة.
-# window     → فترة زمنية مثل الصباح.
-# missing    → لم يحدد المريض وقتا، أو يقبل أي وقت.
-# ambiguous  → الوقت يحتاج توضيحا.
-# unrecognized → تعبير لم نفهمه.
-#
-# لا يبحث هذا الملف عن المواعيد ولا يحجزها.
-# ==================================================
+# times.py
+# هذا الملف يحلل الوقت الذي يذكره المريض.
+# يميز بين الساعة المحددة والفترة الزمنية.
+# يدعم العربية والإنجليزية ولا ينشئ أي حجز.
 
 import re
 from typing import Literal, TypedDict
 
 
-# شكل نتيجة تحليل الوقت.
+# تحديد شكل نتيجة تحليل الوقت.
 class TimePreference(TypedDict):
     kind: Literal[
-        "exact", "window", "missing",
-        "ambiguous", "unrecognized"
+        "exact",
+        "window",
+        "missing",
+        "ambiguous",
+        "unrecognized",
     ]
-
     requested_time: str | None
     after: str | None
     before: str | None
 
 
-# تجهيز النتيجة دون تكرار القاموس في كل شرط.
+# إنشاء نتيجة موحدة لجميع الحالات.
 def _result(
     kind: str,
     requested_time: str | None = None,
     after: str | None = None,
     before: str | None = None,
 ) -> TimePreference:
-
     return {
         "kind": kind,
         "requested_time": requested_time,
@@ -45,7 +37,7 @@ def _result(
     }
 
 
-# أسماء الساعات المكتوبة بالعربية.
+# أسماء الساعات المكتوبة بالكلمات العربية.
 ARABIC_HOURS = {
     "الواحدة": 1,
     "الاولى": 1,
@@ -63,12 +55,17 @@ ARABIC_HOURS = {
 }
 
 
-# الدالة الرئيسية لتحليل الوقت.
+# تحويل عدد دقائق إلى وقت بصيغة HH:MM.
+def _format_minutes(total: int) -> str:
+    return f"{total // 60:02d}:{total % 60:02d}"
+
+
+# تحليل التعبير الزمني الذي ذكره المريض.
 def normalize_time(
-    time_text: str | None
+    time_text: str | None,
 ) -> TimePreference:
 
-    # 1. لم يذكر المريض وقتا.
+    # عدم وجود وقت يعني عدم وجود تفضيل زمني.
     if not time_text or not time_text.strip():
         return _result("missing")
 
@@ -77,82 +74,105 @@ def normalize_time(
     # إزالة التشكيل العربي.
     text = re.sub(r"[\u064b-\u065f\u0670]", "", text)
 
-    # تحويل الأرقام العربية والفارسية إلى أرقام إنجليزية.
+    # تحويل الأرقام العربية والفارسية.
     text = text.translate(str.maketrans(
         "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹",
-        "01234567890123456789"
+        "01234567890123456789",
     ))
 
-    # 2. المريض يقبل أي وقت.
-    if any(word in text for word in (
-        "any time", "anytime", "no preference",
-        "أي وقت", "اي وقت",
+    # قبول جميع الأوقات إذا صرح المريض بذلك.
+    if any(value in text for value in (
+        "any time",
+        "anytime",
+        "no preference",
+        "أي وقت",
+        "اي وقت",
     )):
         return _result("missing")
 
-    # 3. معرفة هل الوقت صباحي أو مسائي.
+    # معرفة هل المريض حدد وقتا بعد أو قبل ساعة.
+    # لا نخلط بين "بعد 3" و"بعد الظهر".
+    direction_match = re.match(
+        r"^(after|before|بعد(?!\s+الظهر)|قبل(?!\s+الظهر))\b",
+        text,
+    )
+
+    direction = direction_match.group(1) if direction_match else None
+
+    # اكتشاف صباح أو مساء.
     am = (
         bool(re.search(r"\ba\.?m\.?\b", text))
-        or any(word in text for word in (
-            "morning", "صباح", "الصبح", "قبل الظهر"
+        or any(value in text for value in (
+            "morning", "صباح", "الصبح", "قبل الظهر",
         ))
     )
 
     pm = (
         bool(re.search(r"\bp\.?m\.?\b", text))
-        or any(word in text for word in (
+        or any(value in text for value in (
             "afternoon", "evening",
-            "مساء", "بعد الظهر", "العصر"
+            "مساء", "بعد الظهر", "العصر",
         ))
     )
 
-    # 4. محاولة قراءة ساعة رقمية مثل 4:30 أو 16:30.
+    # قراءة ساعة تحتوي على دقائق.
     numeric = re.search(
         r"(?<!\d)(\d{1,2}):(\d{1,2})(?!\d)",
-        text
+        text,
     )
 
     if numeric:
         hour = int(numeric.group(1))
         minute = int(numeric.group(2))
 
-        # 09:30 تعتبر صيغة 24 ساعة واضحة.
         leading_zero = (
             len(numeric.group(1)) == 2
             and numeric.group(1).startswith("0")
         )
 
     else:
-        # دعم 4 PM أو الساعة 4 أو at 4.
+        # قراءة ساعة مع AM/PM أو كلمات عربية.
         numeric = re.search(
             r"(?<!\d)(\d{1,2})\s*"
             r"(?:a\.?m\.?|p\.?m\.?|صباحا?|مساءا?)(?!\w)",
-            text
-        ) or re.search(
-            r"(?:\bat\s+|الساعة\s+|الساعه\s+)"
-            r"(\d{1,2})(?!\d)",
-            text
+            text,
         )
+
+        # دعم "at 4" و"الساعة 4".
+        if numeric is None:
+            numeric = re.search(
+                r"(?:\bat\s+|الساعة\s+|الساعه\s+)"
+                r"(\d{1,2})(?!\d)",
+                text,
+            )
+
+        # دعم "after 3" و"بعد 3".
+        if numeric is None and direction:
+            numeric = re.search(
+                r"(?:after|before|بعد|قبل)\s+"
+                r"(\d{1,2})(?!\d)",
+                text,
+            )
 
         hour = int(numeric.group(1)) if numeric else None
         minute = 0
         leading_zero = False
 
-        # دعم الساعة 4 ونص.
+        # دعم نصف الساعة.
         if hour is not None and (
             "ونص" in text or "والنصف" in text
         ):
             minute = 30
 
-    # 5. قراءة الساعة المكتوبة بالكلمات العربية.
+    # قراءة الساعة المكتوبة بالكلمات العربية.
     if hour is None:
         for expression, value in sorted(
             ARABIC_HOURS.items(),
-            key=lambda item: -len(item[0])
+            key=lambda item: -len(item[0]),
         ):
             if re.search(
                 r"(?<!\w)" + re.escape(expression) + r"(?!\w)",
-                text
+                text,
             ):
                 hour = value
 
@@ -161,59 +181,87 @@ def normalize_time(
 
                 break
 
-    # 6. لدينا ساعة محددة.
+    # معالجة ساعة واضحة.
     if hour is not None:
 
-        # رفض ساعة أو دقائق غير صحيحة.
         if hour > 23 or minute > 59:
             return _result("unrecognized")
 
-        # لا يمكن الجمع بين AM و PM.
         if am and pm:
             return _result("ambiguous")
 
         if am or pm:
-
-            # صيغة AM/PM تستخدم ساعات من 1 إلى 12.
-            if hour < 1 or hour > 12:
+            if not 1 <= hour <= 12:
                 return _result("unrecognized")
 
-            # تحويل 12-hour إلى 24-hour.
             hour = (hour % 12) + (12 if pm else 0)
 
         elif 1 <= hour <= 12 and not leading_zero:
-
-            # مثال: 4:30 وحدها قد تكون صباحا أو مساء.
-            # لا نخمن الوقت.
+            # لا نخمن AM أو PM.
             return _result("ambiguous")
 
+        requested_time = f"{hour:02d}:{minute:02d}"
+        total_minutes = hour * 60 + minute
+
+        # بعد الساعة يعني بعد الحد نفسه، وليس عنده.
+        if direction in ("after", "بعد"):
+            if total_minutes == 1439:
+                return _result("unrecognized")
+
+            return _result(
+                "window",
+                after=_format_minutes(total_minutes + 1),
+            )
+
+        # قبل الساعة يعني أن الحد الأعلى حصري.
+        if direction in ("before", "قبل"):
+            if total_minutes == 0:
+                return _result("unrecognized")
+
+            return _result(
+                "window",
+                before=requested_time,
+            )
+
+        # دون before أو after، الوقت محدد بالضبط.
         return _result(
             "exact",
-            requested_time=f"{hour:02d}:{minute:02d}"
+            requested_time=requested_time,
         )
 
-    # 7. لم يذكر ساعة محددة، لكن حدد فترة.
-    if any(word in text for word in (
-        "morning", "صباح", "الصبح", "قبل الظهر"
+    # إذا ذكر قبل أو بعد دون ساعة واضحة نطلب توضيحا.
+    if direction:
+        return _result("unrecognized")
+
+    # فترة الصباح.
+    if any(value in text for value in (
+        "morning", "صباح", "الصبح", "قبل الظهر",
     )):
         return _result(
-            "window", after="09:00", before="12:00"
+            "window",
+            after="09:00",
+            before="12:00",
         )
 
-    if any(word in text for word in (
-        "afternoon", "بعد الظهر"
+    # فترة بعد الظهر.
+    if any(value in text for value in (
+        "afternoon", "بعد الظهر",
     )):
         return _result(
-            "window", after="12:00", before="17:00"
+            "window",
+            after="12:00",
+            before="17:00",
         )
 
-    if any(word in text for word in (
-        "evening", "مساء", "العصر"
+    # فترة المساء.
+    if any(value in text for value in (
+        "evening", "مساء", "العصر",
     )):
         return _result(
-            "window", after="17:00", before="19:00"
+            "window",
+            after="17:00",
+            before="19:00",
         )
 
-    # 8. تعبير غير مفهوم.
-    # لا نخمن ولا نختار موعدا عشوائيا.
+    # لا نخمن الوقت غير المفهوم.
     return _result("unrecognized")

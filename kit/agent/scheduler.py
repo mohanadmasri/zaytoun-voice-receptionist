@@ -1,91 +1,98 @@
 
 # scheduler.py
-# هذا الملف مسؤول عن البحث عن المواعيد المتاحة في العيادة.
-# يدعم اختيار الطبيب وفلترة المواعيد حسب الوقت.
-# لا ينشئ حجوزات ولا يلغيها.
+# هذا الملف مسؤول عن البحث عن المواعيد الحقيقية في العيادة.
+# يستخدم Slot Handoff لتجهيز شروط البحث والتحقق من النتائج.
+# يدعم الطبيب المحدد والطبيب المفضل والبحث عن البدائل.
+# لا ينشئ أي حجز ولا يلغي أي موعد.
 
 from agent.state import AgentState
-from agent.time_normalization import normalize_time
+from agent.slot_handoff import (
+    build_find_slots_args,
+    slot_matches_request,
+)
 from core.contracts import ClinicGateway
 
 
-# البحث عن المواعيد الحقيقية باستخدام MCP Gateway.
+# إرسال طلب البحث الحقيقي إلى العيادة عبر MCP.
 async def find_available_slots(
     gateway: ClinicGateway,
-    service_id: str,
-    requested_date: str,
-    provider_id: str | None = None,
-    time_filters: dict | None = None,
+    arguments: dict,
 ) -> dict:
 
-    # تجهيز بيانات البحث الأساسية.
-    arguments = {
-        "service_id": service_id,
-        "date_from": requested_date,
-        "date_to": requested_date,
-        "limit": 5,
+    # استبعاد الحقول الفارغة من طلب البحث.
+    clean_arguments = {
+        key: value
+        for key, value in arguments.items()
+        if value is not None
     }
 
-    # إضافة الطبيب فقط إذا كان البحث مقيدًا بطبيب محدد.
-    if provider_id is not None:
-        arguments["provider_id"] = provider_id
-
-    # إضافة حدود الوقت التي تم فهمها من طلب المريض.
-    if time_filters:
-        if time_filters.get("after") is not None:
-            arguments["after"] = time_filters["after"]
-
-        if time_filters.get("before") is not None:
-            arguments["before"] = time_filters["before"]
-
-    # إرسال طلب قراءة فقط إلى العيادة.
-    return await gateway.call_read("find_slots", arguments)
+    # استخدام أداة قراءة فقط دون تنفيذ أي حجز.
+    return await gateway.call_read(
+        "find_slots",
+        clean_arguments,
+    )
 
 
-# التحقق من طلب المريض والبحث عن المواعيد.
+# التأكد من صحة استجابة العيادة.
+def extract_slots(result: dict) -> list[dict]:
+
+    # يجب أن تكون الاستجابة ناجحة.
+    if not isinstance(result, dict):
+        raise ValueError("Invalid clinic response")
+
+    if result.get("ok") is not True:
+        raise ValueError("Clinic slot search failed")
+
+    # يجب أن تحتوي الاستجابة على قائمة مواعيد.
+    slots = result.get("slots")
+
+    if not isinstance(slots, list):
+        raise ValueError("Invalid slots list")
+
+    return slots
+
+
+# الاحتفاظ فقط بالمواعيد التي تطابق طلب المريض.
+def filter_matching_slots(
+    state: AgentState,
+    slots: list[dict],
+) -> list[dict]:
+
+    # نستخدم دالة التحقق التي جهزها Developer A.
+    return [
+        slot
+        for slot in slots
+        if slot_matches_request(state, slot)
+    ]
+
+
+# البحث عن المواعيد بعد اكتمال معلومات Intake.
 async def schedule(
     state: AgentState,
     gateway: ClinicGateway,
 ) -> dict:
 
-    # قراءة الخدمة والتاريخ من الحالة المشتركة.
-    service_id = state.get("service_id")
-    requested_date = state.get("requested_date")
+    # قراءة طريقة اختيار الطبيب.
+    provider_choice = state.get(
+        "provider_choice",
+        "auto",
+    )
 
-    # قراءة الوقت الأصلي وتحويله إلى حدود البحث.
-    time_text = state.get("time_text")
-    time_filters = normalize_time(time_text)
-
-    # عدم تجاهل وقت غير مفهوم والبحث بدونه.
-    if time_text and time_filters is None:
-        return {
-            "stage": "awaiting_time_clarification",
-            "reply": "Please clarify your preferred appointment time.",
-            "proposed_slots": [],
-        }
-
-    # قراءة معلومات اختيار الطبيب.
-    provider_choice = state.get("provider_choice", "auto")
+    # تحديد الطبيب الحالي والطبيب المفضل.
     provider_id = state.get("provider_id")
-    preferred_provider_id = state.get("preferred_provider_id")
+    preferred_provider_id = state.get(
+        "preferred_provider_id"
+    )
 
-    # التأكد من تحديد الخدمة.
-    if not service_id:
-        return {
-            "stage": "needs_service_mapping",
-            "reply": "The appointment service must be identified first.",
-            "proposed_slots": [],
-        }
-
-    # التأكد من تحديد تاريخ الموعد.
-    if not requested_date:
+    # لا نبدأ البحث قبل أن تصبح معلومات Intake جاهزة.
+    if state.get("stage") != "needs_slot_lookup":
         return {
             "stage": "awaiting_details",
-            "reply": "Which date would you like to book?",
+            "reply": "The appointment request is not ready for scheduling.",
             "proposed_slots": [],
         }
 
-    # عدم تجاهل اختيار طبيب محدد إذا لم يتم التعرف عليه.
+    # لا نسمح بتجاهل الطبيب المحدد صراحة.
     if provider_choice == "specific" and not provider_id:
         return {
             "stage": "awaiting_provider_clarification",
@@ -93,80 +100,111 @@ async def schedule(
             "proposed_slots": [],
         }
 
-    # تحديد الطبيب المستخدم في البحث الأول.
-    if provider_choice == "any":
-        search_provider_id = None
-    elif provider_choice == "specific":
-        search_provider_id = provider_id
-    else:
-        search_provider_id = provider_id or preferred_provider_id
+    # تجهيز نسخة من الحالة للبحث الأول.
+    search_state = dict(state)
 
-    # تسجيل ما إذا استخدمنا مواعيد بديلة.
+    # اختيار الطبيب المناسب للبحث الأول.
+    if provider_choice == "any":
+        search_state["provider_id"] = None
+
+    elif provider_choice == "specific":
+        search_state["provider_id"] = provider_id
+
+    else:
+        search_state["provider_id"] = (
+            provider_id or preferred_provider_id
+        )
+
+    # تجهيز معاملات MCP بالاعتماد على Slot Handoff.
+    try:
+        arguments = build_find_slots_args(
+            search_state,
+            limit=5,
+        )
+
+    # التعامل مع بيانات ناقصة أو غير صالحة.
+    except (ValueError, TypeError) as error:
+
+        # عدم تخمين الوقت إذا كان غامضا.
+        if state.get("time_kind") in (
+            "ambiguous",
+            "unrecognized",
+        ):
+            return {
+                "stage": "awaiting_time_clarification",
+                "reply": "Please clarify your preferred appointment time.",
+                "proposed_slots": [],
+            }
+
+        return {
+            "stage": "awaiting_details",
+            "reply": "Please clarify your appointment details.",
+            "proposed_slots": [],
+        }
+
+    # حفظ حالة البحث عن أطباء بديلين.
     used_alternatives = False
 
     try:
-        # البحث الأول مع تمرير الطبيب والوقت.
+        # البحث الأول باستخدام شروط المريض.
         result = await find_available_slots(
             gateway,
-            service_id,
-            requested_date,
-            search_provider_id,
-            time_filters,
+            arguments,
         )
 
-        # التأكد من نجاح الاتصال بالعيادة.
-        if not isinstance(result, dict) or result.get("ok") is not True:
-            return {
-                "stage": "scheduler_error",
-                "reply": "Unable to search for appointments right now.",
-                "proposed_slots": [],
-            }
+        # استخراج المواعيد والتحقق من مطابقتها.
+        slots = extract_slots(result)
 
-        # استخراج المواعيد المتاحة.
-        slots = result.get("slots", [])
+        matching_slots = filter_matching_slots(
+            search_state,
+            slots,
+        )
 
-        # التأكد من صحة نوع البيانات.
-        if not isinstance(slots, list):
-            return {
-                "stage": "scheduler_error",
-                "reply": "The clinic returned an invalid appointment response.",
-                "proposed_slots": [],
-            }
-
-        # البحث عن أطباء بديلين فقط في الوضع التلقائي.
+        # إذا لم تتوفر مواعيد للطبيب المفضل،
+        # يمكن البحث عند أطباء آخرين في وضع auto فقط.
         if (
-            not slots
+            not matching_slots
             and provider_choice == "auto"
-            and search_provider_id is not None
+            and search_state.get("provider_id") is not None
         ):
-            result = await find_available_slots(
-                gateway,
-                service_id,
-                requested_date,
-                time_filters=time_filters,
+
+            # نسخ الحالة دون تقييد البحث بالطبيب المفضل.
+            alternative_state = dict(search_state)
+            alternative_state["provider_id"] = None
+
+            # تجهيز شروط البحث البديل.
+            alternative_arguments = build_find_slots_args(
+                alternative_state,
+                limit=5,
             )
 
-            # التأكد من نجاح البحث البديل.
-            if not isinstance(result, dict) or result.get("ok") is not True:
-                return {
-                    "stage": "scheduler_error",
-                    "reply": "Unable to search for alternative appointments.",
-                    "proposed_slots": [],
-                }
+            # البحث عن مواعيد بديلة بنفس التاريخ والوقت.
+            alternative_result = await find_available_slots(
+                gateway,
+                alternative_arguments,
+            )
 
-            # قراءة المواعيد البديلة.
-            slots = result.get("slots", [])
+            # قراءة النتائج والتحقق من مطابقتها.
+            alternative_slots = extract_slots(
+                alternative_result
+            )
 
-            if not isinstance(slots, list):
-                return {
-                    "stage": "scheduler_error",
-                    "reply": "The clinic returned an invalid appointment response.",
-                    "proposed_slots": [],
-                }
+            matching_slots = filter_matching_slots(
+                alternative_state,
+                alternative_slots,
+            )
 
-            used_alternatives = bool(slots)
+            used_alternatives = bool(matching_slots)
 
-    # التعامل مع أي خطأ دون اختراع مواعيد.
+    # التعامل مع استجابة غير صحيحة من العيادة.
+    except ValueError:
+        return {
+            "stage": "scheduler_error",
+            "reply": "Unable to verify available appointments right now.",
+            "proposed_slots": [],
+        }
+
+    # التعامل مع أخطاء الاتصال أو الأدوات.
     except Exception:
         return {
             "stage": "scheduler_error",
@@ -174,18 +212,18 @@ async def schedule(
             "proposed_slots": [],
         }
 
-    # التعامل مع عدم وجود مواعيد مناسبة.
-    if not slots:
+    # عدم اختراع مواعيد عند غياب النتائج.
+    if not matching_slots:
         return {
             "stage": "no_slots",
-            "reply": "No appointments are available for the requested date and time.",
+            "reply": "No matching appointments are available for your request.",
             "proposed_slots": [],
         }
 
-    # توضيح أن المواعيد من أطباء بديلين عند الحاجة.
+    # توضيح أن بعض المواعيد من البحث البديل.
     if used_alternatives:
         reply = (
-            "No appointments were found with the preferred doctor. "
+            "No matching appointments were found with the preferred doctor. "
             "Alternative appointments are available. Please select a slot."
         )
     else:
@@ -194,9 +232,9 @@ async def schedule(
             "Please select a slot."
         )
 
-    # إعادة المواعيد الحقيقية دون تأكيد أو إنشاء أي حجز.
+    # إعادة المواعيد الحقيقية دون إنشاء حجز.
     return {
         "stage": "slots_proposed",
         "reply": reply,
-        "proposed_slots": slots,
+        "proposed_slots": matching_slots,
     }
