@@ -25,7 +25,9 @@ class FakeGateway:
                  "start": start, "service_id": "dental_checkup",
                  "provider_id": "dr_khoury", "provider_name": "Dr. Rania Khoury"}
                 for start in ("09:00", "15:00", "15:15", "16:30", "17:00")
-            ]}
+            ] + [{"slot_id": "TEST-WRONG-DATE", "date": "2026-11-04", "start": "16:30",
+                  "service_id": "dental_checkup", "provider_id": "dr_khoury",
+                  "provider_name": "Dr. Rania Khoury"}]}
         raise AssertionError(f"Unexpected tool: {name}")
 
     async def call_write(self, name, args):
@@ -63,7 +65,9 @@ async def main():
         assert len(gateway.searches) == 1
         assert gateway.searches[0]["after"] == "15:01"
         assert [slot["start"] for slot in state["proposed_slots"]] == ["15:15", "16:30", "17:00"]
-    print("PASSED: English and Arabic after-3 requests exclude morning and 15:00 slots")
+        assert all(slot["date"] == "2026-11-03" for slot in state["proposed_slots"])
+        assert "TEST-WRONG-DATE" not in state["reply"]
+    print("PASSED: English and Arabic after-3 requests exclude morning, 15:00, and wrong dates")
 
     state, gateway = await search("4:30 PM")
     assert state["time_kind"] == "exact"

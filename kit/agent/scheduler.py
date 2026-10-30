@@ -4,6 +4,7 @@
 # يستخدم Slot Handoff لتجهيز شروط البحث والتحقق من النتائج.
 # يدعم الطبيب المحدد والطبيب المفضل والبحث عن البدائل.
 # لا ينشئ أي حجز ولا يلغي أي موعد.
+# المدخل AgentState وبوابة قراءة؛ المخرج مواعيد مصفاة ورد يعرضها بنفس الترتيب.
 
 from agent.state import AgentState
 from agent.slot_handoff import (
@@ -11,6 +12,7 @@ from agent.slot_handoff import (
     slot_matches_request,
 )
 from core.contracts import ClinicGateway
+from agent.slot_selection import format_slot_options
 
 
 # إرسال طلب البحث الحقيقي إلى العيادة عبر MCP.
@@ -232,9 +234,15 @@ async def schedule(
             "Please select a slot."
         )
 
+    # نبني العرض من نفس القائمة التي سنحفظها، فلا تتغير دلالة أرقام الخيارات.
+    reply += "\n" + format_slot_options(matching_slots)
+    reply += "\nChoose an option number (for example, option 2) or a slot ID."
+
     # إعادة المواعيد الحقيقية دون إنشاء حجز.
     return {
         "stage": "slots_proposed",
         "reply": reply,
         "proposed_slots": matching_slots,
+        "selected_slot_id": None,
+        "pending_action": None,
     }

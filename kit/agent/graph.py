@@ -27,7 +27,7 @@ from agent.service_mapping import match_service
 from agent.patient_memory import lookup_returning_patient
 from agent.service_mapping import match_provider
 from agent.scheduler_node import scheduler_node
-from agent.slot_selection import select_slot, extract_time, find_slots_by_id
+from agent.slot_selection import select_slot, extract_time, find_slots_by_id, extract_option_numbers
 from agent.slot_handoff import slot_matches_request
 from actions.approval import prepare_booking_action
 # ==================================================
@@ -326,13 +326,15 @@ def route_after_intake(
 
 # تستقبل حالة المتابعة وتعيد الاختيار أو طلب البيانات أو الموافقة المعلقة.
 # تتحقق من انتماء الاختيار للقائمة ومطابقته للطلب؛ لا تستخدم أدوات خارجية.
-# الاسم والهاتف يكملان الاختيار السابق؛ ذكر وقت أو معرّف يعيد فحص الاختيار.
+# الاسم والهاتف يكملان الاختيار السابق؛ ذكر رقم خيار أو وقت أو معرّف يعيد فحص الاختيار.
 def slot_followup_node(state: AgentState) -> dict:
     updates = {}
     message = state.get("current_message", "")
     choosing = bool(
-        extract_time(message) is not None
+        extract_option_numbers(message) is not None
+        or extract_time(message) is not None
         or find_slots_by_id(state.get("proposed_slots", []), message)
+        or "SL-" in message.upper()
     )
     if choosing or not state.get("selected_slot_id"):
         updates = select_slot(state, message)

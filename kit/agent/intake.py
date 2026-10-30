@@ -15,7 +15,7 @@ from openai import AsyncOpenAI
 import re
 from pydantic import BaseModel, model_validator
 from agent.state import AgentState
-from agent.slot_selection import extract_time, find_slots_by_id
+from agent.slot_selection import extract_time, find_slots_by_id, extract_option_numbers
 # تحميل متغيرات البيئة من ملف .env
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
@@ -287,6 +287,9 @@ def is_slot_selection_reply(state: AgentState, result: IntakeResult) -> bool:
         return False
 
     message = state.get("current_message", "")
+    # حتى الرقم غير الصالح يذهب للتحقق، ولا يتحول إلى وقت بحث جديد من LLM.
+    if extract_option_numbers(message) is not None:
+        return True
     if find_slots_by_id(state["proposed_slots"], message):
         return True
     if extract_time(message) is None:
