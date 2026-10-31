@@ -15,6 +15,7 @@ import re
 from agent.state import AgentState
 from agent.slot_handoff import slot_matches_offer
 from agent.presentation import say, display_date, display_time, provider_label
+from agent.times import normalize_clock_words
 
 
 # تستقبل قائمة المواعيد المصفاة وتعيد نصًا مرقمًا بنفس ترتيبها دون فرز أو نسخ مواعيد.
@@ -91,6 +92,8 @@ def extract_option_numbers(message: str) -> list[int] | None:
             return []
         values = [match.group(1) for match in labelled]
     elif re.search(r"\b(?:options?|choices?)\b|الخيار", text, re.IGNORECASE):
+        if re.search(r"\b(?:option|choice)\s+with\b|الخيار\s+(?:مع|عند)", text, re.I):
+            return None
         return []
     else:
         return None
@@ -191,7 +194,7 @@ def filter_by_provider(
 
 # تكتشف إشارة اختيار من القائمة الحالية؛ تستثني تقديم الاسم والهاتف من مطابقة اسم الطبيب.
 def has_slot_reference(state: dict, message: str) -> bool:
-    return bool(extract_option_numbers(message) is not None or re.search(r"\d{1,2}:\d{2}", message)
+    return bool(extract_option_numbers(message) is not None or re.search(r"\d{1,2}:\d{2}", normalize_clock_words(message))
                 or "SL-" in message.upper()
                 or (filter_by_provider(state.get("proposed_slots", []), message, state)
                     and not re.search(r"اسمي|رقمي|my name|phone", message, re.IGNORECASE)))
@@ -200,7 +203,7 @@ def has_slot_reference(state: dict, message: str) -> bool:
 # تعيد الساعات المحتملة لوقت غير موسوم بالصباح/المساء، ولا تختار إلا من المواعيد المعروضة.
 # عند وجود 03:45 و15:45 معًا يبقى الاختيار غامضًا بدل افتراض فترة زمنية.
 def offered_clock_times(message: str) -> list[str] | None:
-    text = message.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789"))
+    text = normalize_clock_words(message).translate(str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789"))
     tokens = re.findall(r"\b\d{1,2}:\d{2}\s*(?:AM|PM)?\b", text, re.IGNORECASE)
     if not tokens:
         return None

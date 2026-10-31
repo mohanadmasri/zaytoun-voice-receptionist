@@ -3,6 +3,11 @@
 هذه المرحلة تعيد استخدام Gradio وOpenRouter STT ونطق المتصفح الموجودة.
 لا توجد مكتبات جديدة، ولا تنزيل نماذج، ولا خدمة TTS مدفوعة جديدة.
 
+**تحديث 31 أكتوبر:** الصوت أصبح مرحلتين للحماية من تفريغ غير أمين. بعد التسجيل اضغط
+«تفريغ التسجيل الحالي»، راجع النص، ثم «استخدم النص بعد مراجعته». لا يبدأ Graph قبل
+مراجعة النص، ولا تعني مراجعة النص الموافقة على الحجز. الملف القديم أو token القديم يرفضان.
+التفاصيل والقياسات وحدود التحقق في [RELIABILITY_REPORT_AR.md](RELIABILITY_REPORT_AR.md).
+
 ## تشغيل الخدمات
 
 نفذ الأوامر من `kit` بعد تفعيل `.venv`، وكل خدمة في terminal مستقل.
@@ -39,9 +44,9 @@ python ui/app_ui.py
 ## خطوات العرض اليدوي
 
 1. سجّل: “I would like a dental checkup on November 3, 2026 after 3 PM. Any doctor is fine.”
-2. أوقف التسجيل. تحقق من transcript، والخيارات المرقمة، وحالة `slots_proposed`، وسماع الرد.
-3. سجّل “option two”. يجب أن يُحفظ معرّف ثاني موعد في القائمة الحالية.
-4. سجّل “My name is Test Patient and my phone number is zero five nine nine, zero zero zero, nine nine nine.”
+2. أوقف التسجيل واضغط Transcribe. راجع transcript ثم Use transcript؛ بعدها تحقق من الخيارات وحالة `slots_proposed`.
+3. سجّل “option two”، ثم فرّغ وراجع النص واستخدمه. يجب أن يُحفظ معرّف ثاني موعد في القائمة الحالية.
+4. سجّل اسم مريض كاملًا مثل “My name is Lina Mansour and my phone number is zero five nine nine, zero zero zero, nine nine nine.” وراجع النص قبل استخدامه.
 5. تحقق من `awaiting_approval` وملخص الخدمة والتاريخ والوقت والطبيب وبيانات المريض.
 6. توقف هنا لعرض voice-to-approval دون كتابة. يمكن ضغط Reject لإلغاء الطلب.
 
@@ -62,6 +67,9 @@ curl.exe -X POST http://127.0.0.1:8000/api/voice -F "session_id=voice-demo-1" -F
 ```
 
 الرد يتضمن حقول ChatResponse و`transcript` و`audio_b64` و`audio_mime`.
+في مرحلة المراجعة يحتوي أيضًا `transcript_token` و`needs_transcript_confirmation=true`،
+ولا يتغير الحجز. بعد مراجعة النص أرسل JSON إلى `/api/voice/confirm` يحتوي
+`session_id` و`transcript_token` نفسه. تنتهي صلاحية النص بعد خمس دقائق أو تغير الجلسة/التسجيل.
 مع `TTS_PROVIDER=browser` حقلا الصوت `null`؛ Gradio ينطق `reply` باستخدام speechSynthesis.
 عميل HTTP وحده لا يشغّل نطق المتصفح.
 

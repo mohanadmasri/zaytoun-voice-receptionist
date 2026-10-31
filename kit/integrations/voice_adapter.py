@@ -8,9 +8,12 @@ import io
 import os
 import re
 import wave
+import numpy as np
+from time import perf_counter
 
 from voice import STTError, speak, transcribe
 from voice.stt import sniff_format
+from voice.stt import request_metrics
 
 
 MAX_AUDIO_BYTES = 10 * 1024 * 1024
@@ -43,6 +46,17 @@ def validate_audio(data: bytes) -> None:
                 expected_bytes = frame_count * recording.getnchannels() * recording.getsampwidth()
                 if frame_count == 0 or len(recording.readframes(frame_count)) != expected_bytes:
                     raise ValueError("Incomplete WAV recording")
+                if recording.getsampwidth() != 2:
+                    raise ValueError("Unsupported PCM width")
+                recording.rewind()
+                samples = np.frombuffer(recording.readframes(frame_count), dtype="<i2").astype(np.float64)
+                # نفحص المزج الذي سيرسله STT أيضًا؛ قناتان متعاكستان قد تصبحان صمتًا بعد downmix.
+                samples = samples.reshape(-1, recording.getnchannels()).mean(axis=1)
+                # قياس مستوى الإشارة فقط، لا VAD ولا درجة ثقة تفريغ. لا نرفض عبارة قصيرة حسب كلماتها.
+                rms = float(np.sqrt(np.mean(samples * samples)))
+                clipped = float(np.mean(np.abs(samples) >= 32760))
+                if rms < 20 or clipped > 0.20:
+                    raise ValueError("Silent or heavily clipped recording")
         except (wave.Error, EOFError, ValueError, RuntimeError, OverflowError):
             raise VoiceError(422, "The WAV recording could not be read. Please record again.") from None
 
@@ -52,10 +66,18 @@ class VoiceAdapter:
     # تستقبل التسجيل كـbytes وتعيد النص الأصلي كما فرغه STT دون تبديل أسماء أو أرقام.
     # المهلة تمنع تعليق HTTP؛ انتهاء المهلة لا يستطيع إيقاف thread الشبكة بالقوة.
     async def transcribe(self, data: bytes, language_hint: str | None = None) -> str:
+        started = perf_counter()
         validate_audio(data)
+        self.timings = {"audio_validation_ms": round((perf_counter() - started) * 1000, 2)}
+        started = perf_counter()
+        # القياس محلي للـthread الحالي، ولا نقرأ last_usage العامة التي قد تخص جلسة ثانية.
+        def run_stt():
+            request_metrics.encoding_ms = None
+            text = transcribe(data, language_hint)
+            return text, request_metrics.encoding_ms
         try:
-            text = await asyncio.wait_for(
-                asyncio.to_thread(transcribe, data, language_hint), timeout=STT_TIMEOUT_SECONDS,
+            text, encoding_ms = await asyncio.wait_for(
+                asyncio.to_thread(run_stt), timeout=STT_TIMEOUT_SECONDS,
             )
         except TimeoutError:
             raise VoiceError(504, "Speech recognition took too long. Please try again or type your message.") from None
@@ -63,6 +85,8 @@ class VoiceAdapter:
             raise VoiceError(503, "Speech recognition is unavailable. Please try again or type your message.") from None
         except Exception:
             raise VoiceError(503, "The recording could not be transcribed. Please try again or type your message.") from None
+        self.timings["stt_ms"] = round((perf_counter() - started) * 1000, 2)
+        self.timings["audio_encoding_ms"] = encoding_ms
         if not isinstance(text, str) or not text.strip():
             raise VoiceError(422, "Sorry, I didn't catch that. Please record again or type your message.")
         if len(text) > 8000:

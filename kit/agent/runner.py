@@ -13,6 +13,9 @@
 from agent.graph import graph
 from core.contracts import ChatResponse, ClinicGateway
 from core.session_store import session_store
+from agent.state import create_initial_state
+import re
+from time import perf_counter
 
 
 
@@ -27,12 +30,16 @@ async def handle_message(
 
     # 1. استرجاع بيانات المحادثة السابقة
     state = session_store.get_or_create(session_id)
+    # انتهاء طلب سابق لا يسمح بنقل هوية أو موعد إلى الطلب التالي؛ التحية أثناء طلب معلق لا تمسحه.
+    if state.get("stage") in ("booking_confirmed", "booking_rejected") or re.search(r"\b(?:start a new|new appointment|another appointment)\b|ابدأ من جديد|ابدا من جديد|موعد جديد", message, re.I):
+        state = {**create_initial_state(session_id), "language": state.get("language", "unknown")}
 
     # 2. وضع رسالة المريض الجديدة داخل الحالة
     state["current_message"] = message
     state["current_input_language"] = input_language
 
     # 3. تشغيل LangGraph وتمرير Gateway
+    started = perf_counter()
     updated_state = await graph.ainvoke(
         state,
         context={"gateway": gateway}
@@ -48,6 +55,7 @@ async def handle_message(
         "tool_calls": updated_state.get("tool_calls", []),
         "state": updated_state.get("stage"),
         "language": updated_state.get("language", "en"),
+        "timings": {"intake_ms": updated_state.get("intake_ms", 0), "graph_ms": round((perf_counter() - started) * 1000, 2)},
     }
 
     # إضافة عملية تنتظر الموافقة إذا كانت موجودة

@@ -155,7 +155,8 @@ class ComprehensiveConversationTests(unittest.IsolatedAsyncioTestCase):
             with patch("integrations.voice_adapter.transcribe", return_value=transcript), \
                  patch("integrations.voice_adapter.speak", return_value=None), patch("agent.graph.extract_request", new=fake_extract):
                 response = await self.client.post("/api/voice", data={"session_id": self.session_id, "language_hint": language, "continuation": "true"},
-                                                  files={"audio": ("test.wav", wav_bytes(), "audio/wav")})
+                                                  files={"audio": ("test.wav", wav_bytes() + language.encode(), "audio/wav")})
+                response = await self.client.post("/api/voice/confirm", json={"session_id": self.session_id, "transcript_token": response.json()["transcript_token"]})
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(response.json()["language"], language)
             self.assertEqual(response.json()["state"], expected)

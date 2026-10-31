@@ -20,6 +20,7 @@ from core.contracts import ChatResponse, ClinicGateway
 from core.session_store import session_store
 from agent.slot_handoff import slot_matches_offer
 from agent.presentation import say, booking_summary
+from agent.patient_identity import valid_patient_name
 # تجهيز طلب حجز يحتاج إلى موافقة المريض.
 def prepare_booking_action(state: AgentState) -> PendingAction:
 
@@ -36,8 +37,12 @@ def prepare_booking_action(state: AgentState) -> PendingAction:
         if not state.get(field):
             raise ValueError(f"Missing required field: {field}")
 
+    if not valid_patient_name(state.get("patient_name")):
+        raise ValueError("The actual patient's full name is required")
+    if state.get("date_conflict"):
+        raise ValueError("The requested date must be clarified")
     # لا نفعل مسار الأطفال قبل إضافة التحقق من ولي الأمر
-    if state["service_id"] == "pediatrics_visit":
+    if state["service_id"] == "pediatrics_visit" or state.get("requires_guardian") or state.get("patient_age_unverified"):
         raise ValueError("Guardian verification is required")
 
     # التأكد أن الموعد المختار موجود في قائمة المواعيد المقترحة
@@ -194,6 +199,8 @@ async def handle_approval(
             state["pending_action"] = None
             state["selected_slot_id"] = None
             state["stage"] = "booking_rejected"
+            state["proposed_slots"] = []
+            state["offer_context"] = None
 
             session_store.save(state)
 
@@ -205,6 +212,11 @@ async def handle_approval(
 
         # الحالة الثانية: المريض وافق.
         payload = pending["payload"]
+        if not valid_patient_name(state.get("patient_name")) or state.get("requires_guardian") or state.get("patient_age_unverified") or state.get("date_conflict"):
+            state["pending_action"] = None
+            state["stage"] = "awaiting_patient_details"
+            session_store.save(state)
+            return _approval_response(session_id, state, say(state, "Please verify the patient's full name and guardian details.", "لازم نتحقق من اسم المريض الكامل وبيانات ولي الأمر."))
 
         # التحقق من تطابق بيانات الحجز مع الحالة المحفوظة.
         if (
@@ -290,6 +302,9 @@ async def handle_approval(
 
             state["pending_action"] = None
             state["stage"] = "booking_confirmed"
+            state["proposed_slots"] = []
+            state["selected_slot_id"] = None
+            state["offer_context"] = None
 
             session_store.save(state)
 

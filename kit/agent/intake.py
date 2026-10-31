@@ -17,6 +17,8 @@ from pydantic import BaseModel, model_validator
 from agent.state import AgentState
 from agent.service_mapping import explicit_service_evidence, match_service
 from agent.times import normalize_time
+from agent.patient_identity import valid_patient_name, third_party_request, clear_patient
+from agent.dates import ENGLISH_MONTHS, ARABIC_MONTHS
 from agent.slot_selection import extract_time, find_slots_by_id, extract_option_numbers, has_slot_reference
 # تحميل متغيرات البيئة من ملف .env
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
@@ -128,6 +130,8 @@ async def extract_request(message: str) -> IntakeResult:
     # إنشاء عميل AsyncOpenAI للاتصال بالنموذج عبر OpenRouter
     client = AsyncOpenAI(
         api_key=api_key,
+        timeout=20.0,
+        max_retries=0,
         base_url=os.getenv(
             "OPENROUTER_BASE_URL",
             "https://openrouter.ai/api/v1"
@@ -329,6 +333,44 @@ def update_state_from_intake(
 ) -> AgentState:
     # ننسخ الحالة كي لا نعدّل النسخة الأصلية مباشرة.
     updated_state = state.copy()
+    message = state.get("current_message", "")
+    if result.date_text:
+        weekday_only = re.fullmatch(r"(?:يوم\s+)?(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|الاثنين|الثلاثاء|الأربعاء|الخميس|الجمعة|السبت|الأحد)[.!؟?]?", result.date_text.strip(), re.I)
+        if weekday_only and state.get("requested_date") and re.search(r"\d|" + "|".join(re.escape(m) for m in (*ENGLISH_MONTHS, *ARABIC_MONTHS)), state.get("date_text") or "", re.I):
+            from datetime import date
+            day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+            arabic_days = ["الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت", "الأحد"]
+            old_day = date.fromisoformat(state["requested_date"]).weekday()
+            supplied = result.date_text.strip().strip(".!؟?").removeprefix("يوم ")
+            if supplied.casefold() not in (day_names[old_day].casefold(), arabic_days[old_day]):
+                updated_state["date_conflict"] = supplied
+                updated_state["pending_action"] = None
+            result = result.model_copy(update={"date_text": None})
+        else:
+            updated_state["date_conflict"] = None
+    if third_party_request(message):
+        updated_state = clear_patient(updated_state)
+        updated_state["patient_is_other"] = True
+        if result.patient_phone and result.patient_phone not in message:
+            result = result.model_copy(update={"patient_phone": None})
+        # son لا يثبت أن العمر دون16؛ نطلب العمر بدل اختراع سياسة لجميع الأبناء.
+        updated_state["patient_age_unverified"] = bool(re.search(r"son|daughter|child|ابني|بنتي|طفلي", message, re.I))
+        updated_state["requires_guardian"] = False
+        state = {**state, "patient_name": None, "patient_phone": None}
+    if updated_state.get("patient_age_unverified"):
+        age = re.search(r"\b(\d{1,3})\s*(?:years? old|year old|سنة|سنوات)|(?:عمره|عمرها|age is|aged)\s*(\d{1,3})", message, re.I)
+        if age:
+            updated_state["requires_guardian"] = int(age.group(1) or age.group(2)) < 16
+            updated_state["patient_age_unverified"] = False
+    if result.patient_name and not valid_patient_name(result.patient_name):
+        result = result.model_copy(update={"patient_name": None})
+        updated_state["patient_name"] = None
+        updated_state["pending_action"] = None
+    if result.patient_name and state.get("patient_name") and result.patient_name != state["patient_name"]:
+        updated_state = clear_patient(updated_state)
+        # رقم قديم لا ينتقل إلى مريض جديد إلا إذا ذكره المريض صراحة في هذا الدور.
+        if result.patient_phone == state.get("patient_phone") and result.patient_phone not in message:
+            result = result.model_copy(update={"patient_phone": None})
     evidence = explicit_service_evidence(state.get("current_message", ""))
     if evidence and result.language != "unsupported":
         # نص صريح فقط؛ فحوص السلامة والنية لا تتغير، والمعرف يُتحقق منه لاحقًا بالكتالوج.

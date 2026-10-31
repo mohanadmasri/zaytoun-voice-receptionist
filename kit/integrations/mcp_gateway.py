@@ -136,9 +136,8 @@ class ClinicGateway:
             }
 
         except Exception as exc:
-            logger.exception(
-                "MCP request failed: %s", tool_name
-            )
+            # نوع الخطأ واسم الأداة فقط؛ traceback قد يحتوي URL هاتف أو بيانات حساسة.
+            logger.warning("MCP request failed tool=%s type=%s", tool_name, type(exc).__name__)
 
             return {
                 "ok": False,

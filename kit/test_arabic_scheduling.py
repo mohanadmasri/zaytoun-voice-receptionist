@@ -179,7 +179,7 @@ class ArabicGraphTests(unittest.IsolatedAsyncioTestCase):
             wav.setnchannels(1)
             wav.setsampwidth(2)
             wav.setframerate(16000)
-            wav.writeframes(b"\0\0" * 1600)
+            wav.writeframes(b"\xe8\x03\x18\xfc" * 800)
 
         async def fake_extract(message):
             self.assertEqual(message, ARABIC_TRANSCRIPT)
@@ -191,6 +191,7 @@ class ArabicGraphTests(unittest.IsolatedAsyncioTestCase):
              patch("agent.graph.extract_request", new=fake_extract):
             response = await self.client.post("/api/voice", data={"session_id": self.new_session()},
                                               files={"audio": ("arabic.wav", recording.getvalue(), "audio/wav")})
+            response = await self.client.post("/api/voice/confirm", json={"session_id": response.json()["session_id"], "transcript_token": response.json()["transcript_token"]})
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["transcript"], ARABIC_TRANSCRIPT)
         self.assertEqual(response.json()["state"], "slots_proposed")

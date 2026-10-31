@@ -168,8 +168,8 @@ class NumberedApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["state"], "awaiting_patient_details")
         self.assertEqual(self.state()["selected_slot_id"], "SL-B")
         self.assertEqual(self.state()["time_after"], "15:01")
-        data = await self.send("My name is Test Patient and phone is 0599000999",
-                               patient_name="Test Patient", patient_phone="0599000999")
+        data = await self.send("My name is Lina Mansour and phone is 0599000999",
+                               patient_name="Lina Mansour", patient_phone="0599000999")
         self.assertEqual(data["state"], "awaiting_approval")
         self.assertEqual(data["pending_action"]["payload"]["slot_id"], "SL-B")
         self.assertEqual(len(self.gateway.reads), reads)

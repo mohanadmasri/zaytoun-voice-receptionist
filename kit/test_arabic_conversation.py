@@ -215,7 +215,7 @@ class ArabicConversationTests(unittest.IsolatedAsyncioTestCase):
     async def test_only_missing_patient_detail_is_requested(self):
         await self.search()
         data = await self.send("الخيار الثاني")
-        self.assertEqual(data["reply"], "شو اسمك الكامل؟")
+        self.assertEqual(data["reply"], "شو اسم المريض الكامل؟")
         data = await self.send("اسمي مريضة اختبار", patient_name="مريضة اختبار")
         self.assertEqual(data["reply"], "شو رقم تلفونك؟")
         selected_id = self.state()["selected_slot_id"]
@@ -264,6 +264,7 @@ class ArabicConversationTests(unittest.IsolatedAsyncioTestCase):
              patch("integrations.voice_adapter.speak", return_value=None), patch("agent.graph.extract_request", new=fake_extract):
             response = await self.client.post("/api/voice", data={"session_id": self.session_id},
                                               files={"audio": ("ar.wav", wav_bytes(), "audio/wav")})
+            response = await self.client.post("/api/voice/confirm", json={"session_id": self.session_id, "transcript_token": response.json()["transcript_token"]})
         data = response.json()
         self.assertEqual(data["state"], "slots_proposed")
         self.assertEqual(data["transcript"], TRANSCRIPT)

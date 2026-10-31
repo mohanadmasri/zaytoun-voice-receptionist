@@ -80,8 +80,8 @@ async def main():
     assert len(state["proposed_slots"]) == 3
     print("PASSED: selected slot survives LLM time extraction")
 
-    state = await send(state, "My name is Test Patient and phone is 0599000999", IntakeResult(
-        language="en", intent="booking", patient_name="Test Patient",
+    state = await send(state, "My name is Lina Mansour and phone is 0599000999", IntakeResult(
+        language="en", intent="booking", patient_name="Lina Mansour",
         patient_phone="0599000999"))
     assert state["stage"] == "awaiting_approval", state
     assert state["selected_slot_id"] == "SL-TEST-A"
@@ -97,10 +97,11 @@ async def main():
 
     corrected = await send(deepcopy(state), "My name is Corrected Patient", IntakeResult(
         language="en", intent="booking", patient_name="Corrected Patient"))
-    assert corrected["selected_slot_id"] == "SL-TEST-A"
-    assert corrected["pending_action"]["action_id"] != action_id
-    assert corrected["pending_action"]["payload"]["patient_name"] == "Corrected Patient"
-    print("PASSED: corrected patient details replace old pending approval")
+    # اسم مختلف قد يعني مريضًا آخر؛ نطلب إعادة التحقق بدل حمل الهاتف والموافقة القديمين.
+    assert corrected["selected_slot_id"] is None
+    assert corrected["patient_phone"] is None
+    assert corrected["pending_action"] is None
+    print("PASSED: changed patient name invalidates old identity and approval")
 
     state = await send(state, "I have severe chest pain", IntakeResult(
         language="en", intent="booking", safety="none"))

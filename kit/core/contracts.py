@@ -25,6 +25,9 @@ class PendingAction(TypedDict):
 
 
 class ChatResponse(TypedDict):
+    timings: NotRequired[dict[str, float | None]]
+    transcript_token: NotRequired[str]
+    needs_transcript_confirmation: NotRequired[bool]
     session_reset: NotRequired[bool]
     language: NotRequired[str]
     session_id: str

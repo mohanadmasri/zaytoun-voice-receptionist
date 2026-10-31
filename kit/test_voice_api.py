@@ -21,14 +21,16 @@ from test_numbered_slots import FakeGateway, SLOTS
 from voice import STTError
 
 
-# تنشئ WAV قصيرًا في الذاكرة فقط؛ محتواه صمت لأن خدمة STT وهمية في هذه الاختبارات.
+# تنشئ إشارة PCM قصيرة غير صامتة؛ ليست كلامًا حقيقيًا، وخدمة STT وهمية في هذه الاختبارات.
 def wav_bytes():
+    import math
+    import struct
     output = io.BytesIO()
     with wave.open(output, "wb") as recording:
         recording.setnchannels(1)
         recording.setsampwidth(2)
         recording.setframerate(16000)
-        recording.writeframes(b"\0\0" * 1600)
+        recording.writeframes(b"".join(struct.pack("<h", int(1000 * math.sin(i * 0.1))) for i in range(1600)))
     return output.getvalue()
 
 
@@ -130,8 +132,11 @@ class VoiceApiTests(unittest.IsolatedAsyncioTestCase):
     async def send_voice(self, text, **extracted):
         self.stt.return_value = text
         self.extractions[text.strip()] = extracted
-        return await self.client.post("/api/voice", data={"session_id": self.session_id},
-                                      files={"audio": ("recording.wav", wav_bytes(), "audio/wav")})
+        response = await self.client.post("/api/voice", data={"session_id": self.session_id},
+                                      files={"audio": ("recording.wav", wav_bytes() + uuid4().bytes, "audio/wav")})
+        if response.status_code == 200 and response.json().get("transcript_token"):
+            response = await self.client.post("/api/voice/confirm", json={"session_id": self.session_id, "transcript_token": response.json()["transcript_token"]})
+        return response
 
     # تبدأ البحث من صوت وتتحقق من بقاء المواعيد بعد الثالثة ومن ترتيب الخيارات.
     async def search(self):
@@ -157,15 +162,15 @@ class VoiceApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(data["session_id"], self.session_id)
             self.assertEqual(data["state"], "awaiting_patient_details")
             self.assertEqual(session_store.get_or_create(self.session_id)["selected_slot_id"], "SL-B")
-        response = await self.send_voice("My name is Test Patient and my phone is 0599000999",
-                                         patient_name="Test Patient", patient_phone="0599000999")
+        response = await self.send_voice("My name is Lina Mansour and my phone is 0599000999",
+                                         patient_name="Lina Mansour", patient_phone="0599000999")
         data = response.json()
         self.assertEqual(data["state"], "awaiting_approval")
         self.assertEqual(data["pending_action"]["payload"]["slot_id"], "SL-B")
         self.assertIsNone(data.get("result"))
         self.assertIsNone(data["audio_b64"])
         self.assertIsNone(data["audio_mime"])
-        self.assertIn("الخيار الثاني", self.seen_messages)
+        self.assertIn("الخيار الثاني", [item["content"] for item in session_store.get_or_create(self.session_id)["messages"]])
         response = await self.send_voice("yes")
         self.assertEqual(response.json()["state"], "awaiting_approval")
         self.assertIsNone(response.json().get("result"))
@@ -221,8 +226,8 @@ class VoiceApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_stt_errors_preserve_pending_action(self):
         await self.search()
         await self.send_voice("option two")
-        response = await self.send_voice("My name is Test Patient, phone 0599000999",
-                                         patient_name="Test Patient", patient_phone="0599000999")
+        response = await self.send_voice("My name is Lina Mansour, phone 0599000999",
+                                         patient_name="Lina Mansour", patient_phone="0599000999")
         pending = response.json()["pending_action"]
         before = session_store.get_or_create(self.session_id)
         for transcript in ("", "   "):
@@ -240,7 +245,7 @@ class VoiceApiTests(unittest.IsolatedAsyncioTestCase):
         self.tts.side_effect = RuntimeError("tts failure")
         response = await self.send_voice("Hello")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.seen_messages, ["Hello"])
+        self.assertEqual([item["content"] for item in session_store.get_or_create(self.session_id)["messages"] if item["role"] == "user"], ["Hello"])
         self.assertIsNone(response.json()["audio_b64"])
         self.assertTrue(response.json()["reply"])
 

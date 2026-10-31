@@ -57,6 +57,19 @@ class VoiceUiTests(unittest.TestCase):
         self.assertTrue(outputs[6]["visible"])
         self.assertTrue(outputs[7]["visible"])
 
+    def test_transcript_review_uses_token_without_resending_audio(self):
+        preview = {**self.response, "needs_transcript_confirmation": True, "transcript_token": "review-token"}
+        with patch("ui.app_ui.post", return_value=preview) as post:
+            outputs = app_ui.send_voice("samples/audio/en_02_vague_friday.wav", [], self.request, "English")
+            self.assertEqual(outputs[9], "review-token")
+            self.assertEqual(post.call_args.args[0], "/api/voice")
+        with patch("ui.app_ui.post", return_value=self.response) as post:
+            outputs = app_ui.use_transcript("review-token", [], self.request)
+            self.assertEqual(post.call_args.args[0], "/api/voice/confirm")
+            self.assertEqual(post.call_args.kwargs["json"]["transcript_token"], "review-token")
+            self.assertNotIn("files", post.call_args.kwargs)
+            self.assertIsNone(outputs[9])
+
     def test_microphone_format_and_network_failure(self):
         self.assertEqual(app_ui.mic.get_config()["format"], "wav")
         self.assertEqual(app_ui.mic.get_config()["sources"], ["microphone", "upload"])

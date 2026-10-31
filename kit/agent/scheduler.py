@@ -218,7 +218,7 @@ async def schedule(
                 near_result = await find_available_slots(gateway, build_find_slots_args(near_state, limit=50))
                 nearby = filter_matching_slots(near_state, extract_slots(near_result))
                 used_alternatives = bool(nearby)
-            matching_slots = sorted(nearby, key=lambda slot: (abs(int(slot["start"][:2]) * 60 + int(slot["start"][3:]) - target), slot["start"]))[:5]
+            matching_slots = sorted(nearby, key=lambda slot: (abs(int(slot["start"][:2]) * 60 + int(slot["start"][3:]) - target), slot["start"], str(slot.get("provider_id", "")), str(slot.get("slot_id", ""))))[:5]
             if matching_slots:
                 search_state = near_state
                 used_time_alternatives = True

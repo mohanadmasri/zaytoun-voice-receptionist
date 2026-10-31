@@ -17,6 +17,12 @@ from core.contracts import PendingAction, ToolCall
 
 # يحدد شكل الحالة المشتركة التي تنتقل بين خطوات LangGraph.
 class AgentState(TypedDict, total=False):
+    requires_guardian: bool
+    patient_age_unverified: bool
+    patient_is_other: bool
+    date_conflict: str | None
+    requested_date_change: str | None
+    intake_ms: float
     # أسماء موثقة للعرض ومجموعة المرشحين عند التباس الاختيار، دون تغيير معرفات الحجز.
     service_catalog: list[dict[str, Any]]
     provider_catalog: list[dict[str, Any]]

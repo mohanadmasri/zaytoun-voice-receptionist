@@ -20,6 +20,9 @@ from langgraph.runtime import Runtime
 
 from agent.state import AgentState
 from agent.intake import extract_request, update_state_from_intake
+from agent.intake import IntakeResult
+from agent.patient_identity import valid_patient_name
+import re
 from agent.dates import normalize_date
 from agent.times import normalize_time
 from core.contracts import ClinicGateway
@@ -61,13 +64,21 @@ async def intake_node(state: AgentState) -> AgentState:
     message = state["current_message"]
 
     # استخراج المعلومات باستخدام LLM
-    result = await extract_request(message)
+    started = perf_counter()
+    if re.fullmatch(r"\s*(?:hello|hi|hey|مرحبا|مرحباً|اهلا|أهلا|السلام عليكم)[.!؟?،\s]*", message, re.I):
+        result = IntakeResult(language=state.get("current_input_language") or ("ar" if re.search(r"[\u0600-\u06ff]", message) else "en"))
+    elif state.get("proposed_slots") and re.fullmatch(r"\s*(?:(?:I want |I choose )?(?:the )?(?:option(?: number)?\s+)?(?:one|two|three|first|second|third|\d{1,2})(?: option| one)?|(?:الخيار|الموعد)\s+(?:الأول|الثاني|الثالث|\d{1,2})|(?:الساعة\s+)?(?:three thirty|three and a half|ثلاثة ونص|3 ونص|\d{1,2}:\d{2}(?:\s*[AP]M)?))\s*[.!؟?]?", message, re.I):
+        # الاختيار القصير المحدد لا يحتاج اتصال LLM؛ فحص guardrails المستقل يبقى أدناه.
+        result = IntakeResult(language=state.get("current_input_language") or ("ar" if re.search(r"[\u0600-\u06ff]", message) else "en" if re.search(r"[a-z]", message, re.I) else state.get("language", "unknown")), intent="booking")
+    else:
+        result = await extract_request(message)
     if state.get("current_input_language") in ("ar", "en") and result.language != "unsupported":
         # لا تُمرر هذه القيمة إلا بعد فحص transcript من لغة التسجيل الصريحة.
         result = result.model_copy(update={"language": state["current_input_language"]})
 
     # دمج المعلومات الجديدة مع السابقة
     updated_state = update_state_from_intake(state, result)
+    updated_state["intake_ms"] = round((perf_counter() - started) * 1000, 2)
     # ==================================================
     # تذكير — فحص الحماية المستقل
     #
@@ -293,7 +304,7 @@ async def service_mapping_node(
 
 def route_after_intake(
     state: AgentState
-) -> Literal["normal", "safety", "unsupported", "slot_followup"]:
+) -> Literal["normal", "safety", "unsupported", "slot_followup", "date_conflict"]:
 
     # الطوارئ لها الأولوية القصوى.
     if state.get("safety") == "emergency":
@@ -321,11 +332,14 @@ def route_after_intake(
     ):
         return "safety"
 
+    if state.get("date_conflict"):
+        # لا نعيد تطبيع تاريخ مؤكد أو نستدعي العيادة قبل حسم تعارض اليوم الجديد.
+        return "date_conflict"
     # نوجّه المتابعة بعد فحوص السلامة، بشرط بقاء المواعيد صالحة.
     if state.get("proposed_slots") and state.get("stage") in (
         "slots_proposed", "awaiting_slot_selection", "slot_selected",
         "awaiting_patient_details", "awaiting_approval",
-    ):
+    ) and not state.get("date_conflict"):
         return "slot_followup"
 
     # السماح بمتابعة المسار العادي.
@@ -339,6 +353,8 @@ def slot_followup_node(state: AgentState) -> dict:
     updates = {}
     message = state.get("current_message", "")
     choosing = has_slot_reference(state, message)
+    if not choosing and not state.get("selected_slot_id"):
+        return {"reply": say(state, "Your appointment options are still available. Which option would you prefer?", "خيارات موعدك بعدها موجودة. أي خيار بناسبك؟")}
     if choosing or not state.get("selected_slot_id"):
         updates = select_slot(state, message)
         if updates.get("stage") != "slot_selected":
@@ -352,8 +368,8 @@ def slot_followup_node(state: AgentState) -> dict:
         return {"stage": "awaiting_slot_selection", "selected_slot_id": None,
                 "pending_action": None, "reply": say(state, "Please choose one of the available appointments.", "اختار موعد من الخيارات المتاحة، لو سمحت.")}
 
-    if not selected_state.get("patient_name") or not selected_state.get("patient_phone"):
-        question = (say(state, "What is your full name?", "شو اسمك الكامل؟") if not selected_state.get("patient_name")
+    if not valid_patient_name(selected_state.get("patient_name")) or not selected_state.get("patient_phone"):
+        question = (say(state, "What is the patient's full name?", "شو اسم المريض الكامل؟") if not valid_patient_name(selected_state.get("patient_name"))
                     else say(state, "What is your phone number?", "شو رقم تلفونك؟"))
         return {**updates, "stage": "awaiting_patient_details", "pending_action": None,
                 "reply": question}
@@ -362,6 +378,12 @@ def slot_followup_node(state: AgentState) -> dict:
         pending = prepare_booking_action(selected_state)
     except ValueError:
         # لا نتجاوز تحقق الموافقة، بما فيه شرط ولي الأمر لمسار الأطفال.
+        if selected_state.get("patient_age_unverified"):
+            return {**updates, "stage": "awaiting_patient_details", "pending_action": None,
+                    "reply": say(state, "How old is the patient?", "كم عمر المريض؟")}
+        if selected_state.get("requires_guardian") or selected_state.get("service_id") == "pediatrics_visit":
+            return {**updates, "stage": "awaiting_patient_details", "pending_action": None,
+                    "reply": say(state, "Guardian verification is required. Please contact the clinic to complete this request.", "لازم التحقق من ولي الأمر. تواصل مع العيادة لاستكمال الطلب.")}
         return {**updates, "stage": "awaiting_patient_details", "pending_action": None,
                 "reply": say(state, "We need to verify the booking details first.", "لازم نتحقق من بيانات الحجز أولًا.")}
     existing = state.get("pending_action")
@@ -541,7 +563,7 @@ async def patient_lookup_node(
     if result["status"] == "found":
 
         # لا نستبدل اسما قدمه المستخدم بنفسه.
-        if not state.get("patient_name") and result.get("name"):
+        if not state.get("patient_name") and valid_patient_name(result.get("name")) and not state.get("patient_is_other"):
             updates["patient_name"] = result["name"]
 
         # ==========================================
@@ -723,6 +745,8 @@ def choose_next(
     "ready",
 ]:
 
+    if state.get("date_conflict"):
+        return "clarify"
     # 1. رفض اللغة غير المدعومة.
     if state.get("language") == "unsupported":
         return "unsupported"
@@ -757,6 +781,10 @@ def choose_next(
 def clarify_node(state: AgentState) -> dict:
 
     is_arabic = state.get("language") == "ar"
+    if state.get("date_conflict"):
+        return {"stage": "awaiting_details", "reply": say(state,
+            f"You previously requested {state.get('requested_date')}, which conflicts with {state['date_conflict']}. Please confirm the full date you want.",
+            f"طلبك السابق ليوم {state.get('requested_date')} مختلف عن {state['date_conflict']}. ممكن تأكد التاريخ الكامل المطلوب؟")}
 
     if not state.get("service_text"):
         reply = (
@@ -928,6 +956,7 @@ def build_graph():
         {
             "normal": "patient_lookup",
             "slot_followup": "slot_followup",
+            "date_conflict": "clarify",
             "safety": "safety",
             "unsupported": "unsupported",
         },

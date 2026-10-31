@@ -37,6 +37,9 @@ SPEAK_JS = """async (speech) => {
   if (s.audio) { new Audio(s.audio).play().catch((e) => console.warn("autoplay blocked", e)); return; }
   if (!s.text || !window.speechSynthesis) return;
   const u = new SpeechSynthesisUtterance(s.text);
+  const ttsStarted = performance.now();
+  u.onstart = () => { window.zaytounTtsMetrics = {start_ms: performance.now() - ttsStarted}; };
+  u.onend = () => { window.zaytounTtsMetrics = {...window.zaytounTtsMetrics, total_ms: performance.now() - ttsStarted}; };
   const language = s.language === "ar" || s.language === "en" ? s.language
     : (/[\\u0600-\\u06FF]/.test(s.text) ? "ar" : "en");
   let voices = speechSynthesis.getVoices();
@@ -88,6 +91,8 @@ def show(data: dict, history: list) -> tuple:
     calls = data.get("tool_calls") or []
     tools_md = "\n".join(f"- `{c.get('tool')}` {'ok' if c.get('ok') else '**failed**'} ({c.get('ms', '?')} ms)"
                          for c in calls) or "_none_"
+    if data.get("timings"):
+        tools_md += "\n\nTiming (ms): `" + json.dumps(data["timings"]) + "`"
     status = f"**State:** {data.get('state') or '-'}"
     if data.get("session_reset"):
         status += "\n**Session restarted / أُعيد بدء الجلسة**"
@@ -124,7 +129,15 @@ def send_voice(audio_path: str | None, history: list, request: gr.Request, langu
                                        "continuation": str(bool(history)).lower()},
                     files={"audio": (Path(audio_path).name, fh, "audio/wav")})
     heard = data.get("transcript") or "(nothing heard)"
-    return show(data, history + [{"role": "user", "content": f"(voice) {heard}"}])
+    return show(data, history + [{"role": "user", "content": f"(voice preview) {heard}"}]) + (data.get("transcript_token"),)
+
+
+# تأكيد النص المراجع فقط؛ لا علاقة له بزر موافقة الحجز، ولا يعيد رفع الملف الصوتي.
+def use_transcript(token, history, request: gr.Request):
+    if not token:
+        raise gr.Error("Record again and review the transcript / أعد التسجيل وراجع النص أولًا.")
+    data = post("/api/voice/confirm", json={"session_id": session_id(request), "transcript_token": token})
+    return show(data, history) + (None,)
 
 
 # ترسل قرار الزر ومعرف العملية فقط؛ تفاصيل الحجز تُقرأ من الخادم لا من المتصفح.
@@ -150,6 +163,7 @@ def reject(pending, history, request: gr.Request):
 with gr.Blocks(title="Clinic receptionist") as demo:
     gr.Markdown(f"## Clinic receptionist\nConnected to `{APP_URL}`. Speak or type in English or Arabic.")
     pending_state = gr.State(None)
+    voice_token = gr.State(None)
     speech = gr.Textbox(visible=False)
     with gr.Row():
         with gr.Column(scale=3):
@@ -158,8 +172,10 @@ with gr.Blocks(title="Clinic receptionist") as demo:
                 msg = gr.Textbox(placeholder="Type a message and press Enter", show_label=False, scale=5)
                 send = gr.Button("Send", variant="primary", scale=1)
             mic = gr.Audio(sources=["microphone", "upload"], type="filepath", format="wav",
-                           label="Speak: record (sent when you stop) or upload a WAV/MP3 file")
+                           label="Record, then Transcribe / سجّل ثم اضغط تفريغ التسجيل")
             recording_language = gr.Radio(["العربية", "English"], value="العربية", label="لغة التسجيل / Recording language")
+            transcribe_btn = gr.Button("Transcribe current recording / تفريغ التسجيل الحالي")
+            use_transcript_btn = gr.Button("Use transcript / استخدم النص بعد مراجعته")
         with gr.Column(scale=2):
             transcript = gr.Textbox(label="Transcript (what your app heard)", interactive=False)
             status = gr.Markdown("**State:** -")
@@ -175,8 +191,12 @@ with gr.Blocks(title="Clinic receptionist") as demo:
     replay.click(None, [speech], None, js=SPEAK_JS)
     for event in (msg.submit, send.click):
         event(send_text, [msg, chat], outs + [msg]).then(None, [speech], None, js=SPEAK_JS)
-    for event in (mic.stop_recording, mic.upload):
-        event(send_voice, [mic, chat, recording_language], outs).then(None, [speech], None, js=SPEAK_JS)
+    # زر واحد يرفع لقطة الملف الحالي؛ لا نعالج أحداث stop وupload المتداخلة تلقائيًا.
+    transcribe_btn.click(send_voice, [mic, chat, recording_language], outs + [voice_token], concurrency_limit=1)
+    use_transcript_btn.click(use_transcript, [voice_token, chat], outs + [voice_token]).then(None, [speech], None, js=SPEAK_JS)
+    mic.start_recording(lambda: None, None, voice_token, queue=False)
+    mic.clear(lambda: None, None, voice_token, queue=False)
+    mic.upload(lambda: None, None, voice_token, queue=False)
     approve_btn.click(approve, [pending_state, chat], outs).then(None, [speech], None, js=SPEAK_JS)
     reject_btn.click(reject, [pending_state, chat], outs).then(None, [speech], None, js=SPEAK_JS)
 

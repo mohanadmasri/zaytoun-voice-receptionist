@@ -5,6 +5,10 @@
 # الحالة والأقفال في RAM؛ شغّل worker واحدًا حتى إضافة تخزين مشترك.
 # الصوت والنص يشتركان في process_message؛ الكتابة تبقى في مسار الموافقة فقط.
 import asyncio
+import hashlib
+import json
+import logging
+from uuid import uuid4
 from collections import defaultdict
 from time import perf_counter
 from typing import Annotated, Any, Literal
@@ -50,6 +54,7 @@ class TracedGateway:
     def __init__(self, gateway: GatewayProtocol):
         self.gateway = gateway
         self.tool_calls = []
+        self.read_cache = {}
 
     # تنفذ استدعاء واحدًا وتعيد نتيجته كما هي؛ تسجل الفشل حتى عند رفع استثناء.
     async def _call(self, method, tool_name: str, args: dict) -> dict:
@@ -65,7 +70,15 @@ class TracedGateway:
 
     # تستقبل اسم أداة قراءة ومعاملاتها وتعيد نتيجة MCP دون تغيير صلاحيات البوابة.
     async def call_read(self, tool_name: str, args: dict) -> dict:
-        return await self._call(self.gateway.call_read, tool_name, args)
+        key = (tool_name, json.dumps(args, sort_keys=True))
+        if tool_name in ("clinic_info", "list_services") and key in self.read_cache:
+            from copy import deepcopy
+            return deepcopy(self.read_cache[key])
+        result = await self._call(self.gateway.call_read, tool_name, args)
+        if tool_name in ("clinic_info", "list_services") and isinstance(result, dict) and result.get("ok") is True:
+            from copy import deepcopy
+            self.read_cache[key] = deepcopy(result)
+        return result
 
     # تمرر كتابة من Approval Handler فقط؛ لا تمنح LLM صلاحية كتابة جديدة.
     async def call_write(self, tool_name: str, args: dict) -> dict:
@@ -74,6 +87,22 @@ class TracedGateway:
 
 app = FastAPI(title="Zaytoun Voice Receptionist")
 app.state.session_locks = defaultdict(asyncio.Lock)
+app.state.voice_reviews = {}
+app.state.voice_generations = {}
+app.state.last_audio = {}
+
+
+# بصمة الحالة تمنع تطبيق تفريغ قديم بعد نص جديد أو تغيير موافقة؛ لا نسجل محتواها أو بيانات المريض.
+def state_fingerprint(session_id: str) -> str:
+    state = session_store.get_or_create(session_id)
+    return hashlib.sha256(json.dumps(state, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
+
+
+# تأكيد النص لا يمثل موافقة حجز؛ لا يقبل العميل نصًا بديلًا أو payload حجز.
+class VoiceReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    session_id: NonEmptyText
+    transcript_token: NonEmptyText
 
 
 # تنشئ بوابة حقيقية لكل طلب؛ Depends تسمح باستبدالها ببوابة وهمية في الاختبار.
@@ -95,20 +124,32 @@ async def health():
 # تستقبل معرف الجلسة والنص والبوابة، وتعيد استجابة Graph مع سجل الجولة كاملًا.
 # هذه نقطة المعالجة المشتركة للنص والصوت؛ لا نرسل HTTP من الخادم إلى نفسه.
 # القفل يشمل قراءة الحالة ومعالجتها وحفظها لمنع ضياع تحديثات الجلسة المتزامنة.
-async def process_message(session_id: str, message: str, gateway, continuation: bool = False, input_language: str | None = None):
+async def process_message(session_id: str, message: str, gateway, continuation: bool = False, input_language: str | None = None, expected_state: str | None = None, expected_generation: str | None = None):
+    started = perf_counter()
     traced = TracedGateway(gateway)
     async with app.state.session_locks[session_id]:
+        if expected_state and expected_state != state_fingerprint(session_id):
+            raise HTTPException(409, "The conversation changed. Please record again / المحادثة تغيّرت، أعد التسجيل.")
+        if expected_generation and app.state.voice_generations.get(session_id) != expected_generation:
+            raise HTTPException(409, "A newer recording replaced this one / وصل تسجيل أحدث، أعد المراجعة.")
+        app.state.voice_reviews.pop(session_id, None)
+        app.state.voice_generations.pop(session_id, None)
         session_reset = continuation and not session_store.contains(session_id)
         try:
             response = (await handle_message(session_id, message, traced, input_language)
                         if input_language else await handle_message(session_id, message, traced))
-        except Exception:
+        except Exception as error:
+            logging.getLogger(__name__).warning("chat_processing_failed type=%s elapsed_ms=%.2f", type(error).__name__, (perf_counter() - started) * 1000)
             # لا نعيد نص الاستثناء الذي قد يحتوي معلومات داخلية أو حساسة.
-            raise HTTPException(503, "Unable to process the message. Please try again.") from None
+            language = input_language or session_store.get_or_create(session_id).get("language")
+            raise HTTPException(503, "تعذر معالجة الرسالة. جرّب مرة تانية." if language == "ar" else "Unable to process the message. Please try again.") from None
     if session_reset:
         response["reply"] = say(response, "The previous session is no longer available; let's review the appointment again. ",
                                 "الجلسة السابقة مش موجودة؛ خلينا نراجع الموعد من جديد. ") + response["reply"]
-    return {**response, "tool_calls": traced.tool_calls, "session_reset": session_reset}
+    formatting = perf_counter()
+    result = {**response, "tool_calls": traced.tool_calls, "session_reset": session_reset}
+    result["timings"] = {**response.get("timings", {}), "processing_ms": round((formatting - started) * 1000, 2), "formatting_ms": round((perf_counter() - formatting) * 1000, 3)}
+    return result
 
 
 # تستقبل JSON المفحوص بـPydantic وتستخدم نفس المعالجة التي يستدعيها مسار الصوت.
@@ -152,13 +193,36 @@ async def voice(
         await audio.close()
         raise HTTPException(422, "session_id must not be empty.")
     transcript = ""
+    generation = uuid4().hex
+    async with app.state.session_locks[session_id]:
+        session_missing = continuation and not session_store.contains(session_id)
+        app.state.voice_generations[session_id] = generation
+        app.state.voice_reviews.pop(session_id, None)
+        snapshot = state_fingerprint(session_id)
+        original_state = session_store.get_or_create(session_id)
     try:
         # نقرأ حدًا أقصى معلومًا بدل تحميل ملف ضخم كاملًا في الذاكرة.
         data = await audio.read(MAX_AUDIO_BYTES + 1)
         if len(data) > MAX_AUDIO_BYTES:
             raise VoiceError(413, "The recording is too large. Please use a shorter recording (up to 10 MB).")
+        digest = hashlib.sha256(data).hexdigest()
+        if app.state.last_audio.get(session_id) == digest:
+            raise VoiceError(409, "This recording was already sent. Please make a new recording / أعد التسجيل؛ هذا الملف أُرسل سابقًا.")
         transcript = await adapter.transcribe(data, language_hint)
-        response = await asyncio.wait_for(process_message(session_id, transcript, gateway, continuation, language_hint), timeout=60)
+        async with app.state.session_locks[session_id]:
+            if app.state.voice_generations.get(session_id) != generation or state_fingerprint(session_id) != snapshot:
+                raise VoiceError(409, "A newer recording or message replaced this one / وصل تسجيل أو رسالة أحدث، أعد التسجيل.")
+            token = uuid4().hex
+            app.state.voice_reviews[session_id] = {"token": token, "text": transcript, "language": language_hint,
+                "snapshot": snapshot, "generation": generation, "created": perf_counter(), "continuation": continuation, "session_missing": session_missing}
+            app.state.last_audio[session_id] = digest
+        language = language_hint or original_state.get("language", "en")
+        return {"session_id": session_id, "transcript": transcript, "transcript_token": token,
+                "needs_transcript_confirmation": True, "state": original_state.get("stage"), "language": language,
+                "session_reset": session_missing,
+                "reply": "راجع النص اللي سمعته. إذا صحيح اضغط «استخدم النص»، أو أعد التسجيل." if language == "ar" else "Review the transcript. If correct, select Use transcript; otherwise record again.",
+                "pending_action": original_state.get("pending_action"), "tool_calls": [],
+                "timings": getattr(adapter, "timings", {}), **EMPTY_AUDIO}
     except VoiceError as error:
         return await voice_error_response(session_id, error, transcript, language_hint)
     except TimeoutError:
@@ -169,12 +233,32 @@ async def voice(
         return await voice_error_response(session_id, VoiceError(503, "Unable to process the recording. Please try again or type your message."), transcript, language_hint)
     finally:
         await audio.close()
-    # القراءة أو تجهيز الموافقة اكتملت؛ فشل TTS يجب ألا يعيد معالجة الرسالة.
+
+
+# لا تطبق نتيجة STT على الحالة إلا بعد مراجعة المريض للنص نفسه، وبنفس نسخة الجلسة.
+@app.post("/api/voice/confirm", response_model=None)
+async def confirm_voice(body: VoiceReviewRequest, gateway=Depends(get_gateway), adapter=Depends(get_voice_adapter)):
+    async with app.state.session_locks[body.session_id]:
+        review = app.state.voice_reviews.get(body.session_id)
+        if not review or review["token"] != body.transcript_token or perf_counter() - review["created"] > 300:
+            raise HTTPException(409, "Transcript expired or replaced / النص قديم أو تم استبداله، أعد التسجيل.")
+        app.state.voice_reviews.pop(body.session_id, None)
+    try:
+        response = await asyncio.wait_for(process_message(body.session_id, review["text"], gateway,
+            review["continuation"], review["language"], review["snapshot"], review["generation"]), timeout=60)
+    except TimeoutError:
+        return await voice_error_response(body.session_id, VoiceError(504, "Please try again or type your message."), review["text"], review["language"])
+    except HTTPException as error:
+        return await voice_error_response(body.session_id, VoiceError(error.status_code, str(error.detail)), review["text"], review["language"])
+    # فشل TTS لا يعيد تشغيل Graph أو يعيد استخدام تسجيل قديم.
+    if review["session_missing"]:
+        response["session_reset"] = True
+        response["reply"] = say(response, "The previous session is unavailable. ", "الجلسة السابقة مش موجودة. ") + response["reply"]
     try:
         spoken = await adapter.synthesize(response["reply"])
     except Exception:
         spoken = dict(EMPTY_AUDIO)
-    return {**response, "transcript": transcript, **spoken}
+    return {**response, "transcript": review["text"], **spoken}
 
 
 # تستقبل القرار فقط وتعيد نتيجة Approval Handler؛ لا تنشئ payload من HTTP.
@@ -183,6 +267,8 @@ async def voice(
 async def approve(body: ApprovalRequest, gateway=Depends(get_gateway)):
     traced = TracedGateway(gateway)
     async with app.state.session_locks[body.session_id]:
+        app.state.voice_reviews.pop(body.session_id, None)
+        app.state.voice_generations.pop(body.session_id, None)
         try:
             response = await handle_approval(body.session_id, body.action_id, body.approved, traced)
         except Exception:

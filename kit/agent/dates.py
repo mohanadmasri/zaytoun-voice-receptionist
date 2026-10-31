@@ -117,12 +117,33 @@ def normalize_date(
     text = date_text.strip().lower()
     text = re.sub(r"[\u064b-\u065f\u0670]", "", text)
     text = " ".join(text.strip(".,!?؟،").split())
+    text = re.sub(r"^(?:on|في)\s+", "", text)
+    text = re.sub(r"\s+من\s+(?=(?:" + "|".join(ARABIC_MONTHS) + r")\b)", " ", text)
+    arabic_ordinals = {"الأول": 1, "الاول": 1, "الثاني": 2, "الثالث": 3, "الرابع": 4,
+                       "الخامس": 5, "السادس": 6, "السابع": 7, "الثامن": 8, "التاسع": 9, "العاشر": 10}
+    arabic_ordinals.update(dict(zip(("الحادي عشر", "الثاني عشر", "الثالث عشر", "الرابع عشر", "الخامس عشر",
+        "السادس عشر", "السابع عشر", "الثامن عشر", "التاسع عشر", "العشرين", "الحادي والعشرين",
+        "الثاني والعشرين", "الثالث والعشرين", "الرابع والعشرين", "الخامس والعشرين", "السادس والعشرين",
+        "السابع والعشرين", "الثامن والعشرين", "التاسع والعشرين", "الثلاثين", "الحادي والثلاثين"), range(11, 32))))
+    for word, number in arabic_ordinals.items():
+        text = re.sub(r"(?<!\w)" + word + r"(?=\s+(?:" + "|".join(ARABIC_MONTHS) + r")\b)", str(number), text)
+    # السنة الناقصة تؤخذ من تقويم العيادة، ولا نتجاوز إلى سنة أخرى تلقائيًا.
+    months = "|".join(ENGLISH_MONTHS)
+    text = re.sub(r"\s+of\s+(?=(?:" + months + r")\b)", " ", text)
+    day = rf"(?:\d{{1,2}}(?:st|nd|rd|th)?|{'|'.join(ENGLISH_ORDINALS)})"
+    if re.fullmatch(rf"(?:(?:{months})\s+{day}|{day}\s+(?:{months}))", text):
+        text += f", {today.year}"
 
     # تحويل الأرقام العربية والفارسية.
     text = text.translate(str.maketrans(
         "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹",
         "01234567890123456789",
     ))
+    english_days = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6}
+    explicit_weekday = re.fullmatch(r"(" + "|".join(english_days) + r")[,]?\s+(.+)", text)
+    if explicit_weekday:
+        resolved = normalize_date(explicit_weekday.group(2), clinic_today)
+        return resolved if resolved and date.fromisoformat(resolved).weekday() == english_days[explicit_weekday.group(1)] else None
     ordinal_names = "|".join(re.escape(name).replace(r"\-", "[- ]") for name in sorted(ENGLISH_ORDINALS, key=len, reverse=True))
     # November second, 2026 وsecond November 2026 يصبحان صيغًا رقمية مدعومة أصلًا.
     for pattern in (rf"(?P<month>{'|'.join(ENGLISH_MONTHS)})\s+(?P<day>{ordinal_names}),?\s+(?P<year>\d{{4}})",
