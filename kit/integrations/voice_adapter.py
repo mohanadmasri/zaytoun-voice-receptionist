@@ -14,12 +14,43 @@ from time import perf_counter
 from voice import STTError, speak, transcribe
 from voice.stt import sniff_format
 from voice.stt import request_metrics
+from agent.patient_identity import normalize_patient_phone, phone_confirmation_reply, spoken_phone_digits
 
 
 MAX_AUDIO_BYTES = 10 * 1024 * 1024
 STT_TIMEOUT_SECONDS = 45
 TTS_TIMEOUT_SECONDS = 5
 EMPTY_AUDIO = {"audio_b64": None, "audio_mime": None}
+RETRY_TRANSCRIPT = "The transcription was unclear. Please record again or type your message."
+PROMPT_ECHO_MARKERS = (
+    "you are a speech to text engine",
+    "transcribe only words actually audible",
+    "the recording language selected by the caller",
+    "use that language s original script",
+    "this is transcription not translation",
+    "do not turn a specialty",
+    "output only the transcript",
+    "preserve leading zeros and repeated digits",
+    "this turn collects or confirms a phone number",
+    "attend to each spoken digit individually",
+    "never fill inaudible digits",
+    "عند سماع رقم تلفون انقل كل رقم مسموع بالترتيب",
+)
+
+
+def validate_transcript(text: str, phone_mode: bool) -> None:
+    # Reject the whole response; removing artifacts could create a different number.
+    words = " ".join(re.findall(r"\w+", text.casefold()))
+    clock = r"\d{2}:\d{2}"
+    if (any(marker in words for marker in PROMPT_ECHO_MARKERS)
+            or re.search(rf"\[\s*{clock}\s*\]|(?<!\d){clock}\s+(?:\d+\s+)?{clock}(?!\d)", text)):
+        raise VoiceError(422, RETRY_TRANSCRIPT)
+    if phone_mode and phone_confirmation_reply(text) is None:
+        # Validate literal digits only. Return the original transcript to the caller.
+        digits = spoken_phone_digits(text)
+        international = re.fullmatch(r"\+(?:970|972)[\d ().-]+", text.strip())
+        if re.search(r"[/\r\n]", text) or not normalize_patient_phone(digits or (text if international else None)):
+            raise VoiceError(422, "The phone number was unclear. Please repeat the digits or type the number.")
 
 
 # تحمل رسالة آمنة للعرض ورمز HTTP؛ لا تتضمن نص استثناء المزود أو مفاتيحه.
@@ -91,6 +122,7 @@ class VoiceAdapter:
             raise VoiceError(422, "Sorry, I didn't catch that. Please record again or type your message.")
         if len(text) > 8000:
             raise VoiceError(422, "The transcript is too long. Please use a shorter recording.")
+        validate_transcript(text, phone_mode)
         # نفحص كتابة اللغة قبل عرض النص أو تشغيل Graph؛ لا نعيد ترجمة نتيجة خاطئة.
         letters = [letter for letter in text if letter.isalpha()]
         arabic = sum(bool(re.match(r"[\u0600-\u06ff]", letter)) for letter in letters)

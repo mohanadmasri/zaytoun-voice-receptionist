@@ -369,6 +369,21 @@ def update_state_from_intake(
             updated_state.update({"patient_phone": None, "confirmed_phone": None, "phone_candidate": None})
     elif patient_name_noise(state, message):
         result = result.model_copy(update={key: None for key in ("patient_name", "patient_phone", "date_text", "time_text", "service_text", "provider_text")})
+    elif (state.get("stage") == "awaiting_patient_details" and state.get("selected_slot_id")
+          and (state.get("current_input_language") or state.get("language")) == "en"
+          and result.language in ("en", "unknown") and result.intent in ("booking", "other")
+          and result.safety == "none" and not result.injection_detected
+          and not valid_patient_name(state.get("patient_name")) and not result.patient_name
+          and not any((result.patient_phone, result.service_text, result.date_text, result.time_text,
+                       result.provider_text, result.provider_any))):
+        # Recover a bare English name only while collecting a missing patient name.
+        name = " ".join(message.split()).rstrip(".")
+        if (re.fullmatch(r"[A-Za-z]+(?:[-'’][A-Za-z]+)* [A-Za-z]+(?:[-'’][A-Za-z]+)*", name)
+                and valid_patient_name(name) and not has_slot_reference(state, message)
+                and not explicit_service_evidence(message) and normalize_time(message)["kind"] == "unrecognized"
+                and name.casefold() not in {"thank you", "thanks again", "no thanks", "yes please", "not sure",
+                                            "my name", "any doctor", "hello there", "try again"}):
+            result = result.model_copy(update={"patient_name": name})
     elif phone_context and (digits := spoken_phone_digits(message)) is not None:
         result = result.model_copy(update={"patient_phone": digits, "patient_name": None, "time_text": None, "date_text": None, "provider_text": None})
     if result.patient_phone:
@@ -384,6 +399,12 @@ def update_state_from_intake(
         if phone is None:
             updated_state["patient_phone"] = None
             updated_state["pending_action"] = None
+    # Recover an explicit clock time when extraction loses its AM/PM marker.
+    elif re.search(r"\b[ap]\.?\s*m\b", message, re.I) and not re.search(r"\b(?:after|before)\b", message, re.I):
+        extracted_time = result.time_text
+        if normalize_time(extracted_time)["kind"] in ("missing", "ambiguous", "unrecognized") or period_reply(extracted_time or ""):
+            if normalize_time(message)["kind"] == "exact":
+                result = result.model_copy(update={"time_text": message})
     period = period_reply(message)
     if period and state.get("selection_candidates") and state.get("proposed_slots"):
         result = result.model_copy(update={"time_text": None})

@@ -59,6 +59,18 @@ class SpokenOptionTests(unittest.TestCase):
 
 # تفحص حدود محول الصوت والتزامه بنطق المتصفح وعدم تنزيل نماذج.
 class VoiceAdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_artifact_checks_apply_outside_phone_collection(self):
+        adapter = VoiceAdapter()
+        for transcript in ("[00:01] dental checkup", "Output only the transcript."):
+            with self.subTest(transcript=transcript), \
+                 patch("integrations.voice_adapter.transcribe", return_value=transcript):
+                with self.assertRaises(VoiceError) as rejected:
+                    await adapter.transcribe(wav_bytes(), "en")
+                self.assertEqual(rejected.exception.status_code, 422)
+        for transcript in ("at 14:00", "Two p m"):
+            with patch("integrations.voice_adapter.transcribe", return_value=transcript):
+                self.assertEqual(await adapter.transcribe(wav_bytes(), "en"), transcript)
+
     async def test_transcript_and_browser_fallback(self):
         with patch("integrations.voice_adapter.transcribe", return_value="  option two  ") as stt:
             self.assertEqual(await VoiceAdapter().transcribe(wav_bytes()), "option two")
@@ -151,6 +163,69 @@ class VoiceApiTests(unittest.IsolatedAsyncioTestCase):
         expected = ["clinic_info", "find_slots"] if service_already_known else ["clinic_info", "list_services", "find_slots"]
         self.assertEqual([c["tool"] for c in response.json()["tool_calls"]], expected)
         return response.json()
+
+    async def test_contaminated_provider_responses_never_reach_intake(self):
+        from voice.stt import transcribe
+
+        await self.search()
+        await self.send_voice("option two")
+        await self.send_voice("My name is Lina Mansour", patient_name="Lina Mansour")
+        before = session_store.get_or_create(self.session_id)
+        seen = list(self.seen_messages)
+        for contaminated in (
+            "00:00 1230 00:01 00:02 with doctor",
+            "00:01 00:02 0599000111",
+            "This is transcription, not translation. Do not turn a specialty (such as أسنان) into a person's name.",
+            "0599000111 or 0599000222",
+            "05990001?11",
+            "05990001111",
+        ):
+            with self.subTest(artifact=contaminated), \
+                 patch.dict(os.environ, {"OPENROUTER_API_KEY": "mock-key", "STT_PROVIDER": "openrouter"}), \
+                 patch("integrations.voice_adapter.transcribe", side_effect=transcribe), \
+                 patch("voice.stt.httpx.post", return_value=httpx.Response(200, json={
+                     "choices": [{"message": {"content": contaminated}}],
+                 })) as provider:
+                response = await self.client.post("/api/voice", data={"session_id": self.session_id},
+                    files={"audio": ("recording.wav", wav_bytes() + uuid4().bytes, "audio/wav")})
+                provider.assert_called_once()
+                self.assertEqual(response.status_code, 422)
+                self.assertEqual(response.json()["transcript"], "")
+                self.assertNotIn("transcript_token", response.json())
+                self.assertIn("type", response.json()["reply"])
+                self.assertEqual(self.seen_messages, seen)
+                self.assertEqual(session_store.get_or_create(self.session_id), before)
+
+    async def test_bare_english_name_after_slot_selection(self):
+        for voice, name in ((False, "layan rabba"), (True, "layin rabba")):
+            with self.subTest(voice=voice):
+                session_store.delete(self.session_id)
+                await self.search()
+                selected = await self.send_voice("option number two")
+                self.assertEqual(selected.json()["reply"], "What is the patient's full name?")
+                before = session_store.get_or_create(self.session_id)
+
+                async def send_name(message):
+                    # Simulate an extractor that leaves patient_name empty for a bare reply.
+                    if voice:
+                        return await self.send_voice(message)
+                    return await self.client.post("/api/chat", json={
+                        "session_id": self.session_id, "message": message,
+                    })
+
+                for invalid in ("layan", "1234", "thank you"):
+                    response = await send_name(invalid)
+                    self.assertEqual(response.json()["reply"], "What is the patient's full name?")
+                    self.assertIsNone(session_store.get_or_create(self.session_id)["patient_name"])
+
+                response = await send_name(name)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["reply"], "What is your phone number?")
+                self.assertIsNone(response.json().get("pending_action"))
+                after = session_store.get_or_create(self.session_id)
+                self.assertEqual(after["patient_name"], name)
+                for field in ("service_id", "requested_date", "provider_id", "selected_slot_id", "proposed_slots"):
+                    self.assertEqual(after[field], before[field], field)
 
     async def test_full_voice_to_approval_demo(self):
         searched = await self.search()

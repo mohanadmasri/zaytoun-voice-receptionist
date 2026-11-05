@@ -79,6 +79,51 @@ class ComprehensiveConversationTests(unittest.IsolatedAsyncioTestCase):
     state = conversation.ArabicConversationTests.state
     search = conversation.ArabicConversationTests.search
 
+    async def test_explicit_pm_followups_preserve_service_and_date(self):
+        for voice in (False, True):
+            for message, extracted in (("Do you have anything around 2 PM?", "2"),
+                                       ("Two p m", "Two p m"),
+                                       ("I want an appointment at 2 PM", "at 2")):
+                with self.subTest(voice=voice, message=message):
+                    session_store.delete(self.session_id)
+                    self.gateway.reads.clear()
+                    ambiguous = await self.send(
+                        "Dental checkup on November 2, 2026 at 2 o'clock", language="en",
+                        service_text="dental checkup", date_text="November 2, 2026",
+                        time_text="at 2 o'clock", provider_any=True,
+                    )
+                    self.assertIn("morning or afternoon", ambiguous["reply"])
+                    self.assertFalse(any(name == "find_slots" for name, _ in self.gateway.reads))
+                    if voice:
+                        async def extract(_message):
+                            return IntakeResult(language="en", intent="booking", time_text=extracted)
+
+                        with patch("agent.graph.extract_request", new=extract), \
+                             patch("integrations.voice_adapter.transcribe", return_value=message), \
+                             patch("integrations.voice_adapter.speak", return_value=None):
+                            response = await self.client.post(
+                                "/api/voice", data={"session_id": self.session_id, "language_hint": "en"},
+                                files={"audio": ("test.wav", wav_bytes() + message.encode(), "audio/wav")},
+                            )
+                        self.assertEqual(response.status_code, 200, response.text)
+                        data = response.json()
+                        self.assertEqual(data["transcript"], message)
+                    else:
+                        data = await self.send(message, language="en", time_text=extracted)
+
+                    self.assertEqual(data["state"], "slots_proposed", data["reply"])
+                    state = self.state()
+                    self.assertEqual(state["service_id"], "dental_checkup")
+                    self.assertEqual(state["requested_date"], "2026-11-02")
+                    self.assertEqual(state["requested_time"], "14:00")
+                    self.assertIn("nearby", data["reply"].lower())
+                    self.assertTrue(state["proposed_slots"])
+                    for slot in state["proposed_slots"]:
+                        self.assertEqual(slot["date"], "2026-11-02")
+                        self.assertEqual(slot["service_id"], "dental_checkup")
+                        self.assertTrue("12:00" <= slot["start"] <= "16:00", slot)
+                    self.assertIsNone(data.get("pending_action"))
+
     async def test_observed_wrong_llm_service_recovers_without_losing_time(self):
         data = await self.send("I need a dentist on November 2, 2026 after 3 PM", language="en",
                                service_text="dentist appointment", date_text="November 2, 2026", time_text="after 3 PM", provider_any=True)

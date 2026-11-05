@@ -103,6 +103,8 @@ def normalize_time(
     text = re.sub(r"\b(?:" + "|".join(english_hours) + r")\b",
                   lambda match: str(english_hours[match.group()]), text)
     text = re.sub(r"\s+o['’]?clock\b", "", text)
+    # Join spaced meridiems in transcripts such as "two p m".
+    text = re.sub(r"(?<=\d)\s*([ap])\.?\s+m\.?(?!\w)", r" \1m", text)
 
     # إزالة التشكيل العربي.
     text = re.sub(r"[\u064b-\u065f\u0670]", "", text)
