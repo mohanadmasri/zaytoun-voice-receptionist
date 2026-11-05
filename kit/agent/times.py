@@ -64,6 +64,16 @@ def _format_minutes(total: int) -> str:
 
 
 # تحليل التعبير الزمني الذي ذكره المريض.
+# جواب فترة مستقل يكمّل ساعة غامضة بدل استبدالها بنافذة بحث جديدة.
+def period_reply(message: str) -> str | None:
+    text = message.strip().strip(".!؟?").casefold()
+    if text in ("morning", "am", "صباح", "صباحا", "صباحًا", "الصباح"):
+        return "AM"
+    if text in ("afternoon", "evening", "pm", "مساء", "مساءً", "مساءا", "المساء", "بعد الظهر", "العصر"):
+        return "PM"
+    return None
+
+
 # تحول عبارة ساعة قصيرة إلى HH:MM للتحليل فقط، دون تغيير transcript أو افتراض AM/PM.
 def normalize_clock_words(message: str) -> str:
     words = {name: i for i, name in enumerate("zero one two three four five six seven eight nine ten eleven twelve".split())}

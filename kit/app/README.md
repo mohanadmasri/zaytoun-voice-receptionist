@@ -20,9 +20,9 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 - `POST /api/voice` مع multipart يحتوي `session_id` وملف `audio` بصيغة WAV أو MP3.
 - `POST /api/voice/confirm` مع `session_id` و`transcript_token` بعد مراجعة التفريغ.
 
-`/api/voice` يعرض التفريغ أولًا دون تغيير الحالة أو تشغيل Graph. اختر لغة التسجيل،
-اضغط Transcribe، راجع النص ثم Use transcript. هذا الزر منفصل عن Approve الخاص بالحجز.
-انظر [تقرير السلامة والقياسات](../RELIABILITY_REPORT_AR.md) للقيود والتغييرات في دورة الجلسة.
+`/api/voice` يفرغ التسجيل ويشغل المحادثة تلقائيًا، ولا يوافق على الحجز. الواجهة ترسله
+عند إيقاف التسجيل؛ التصحيح متاح بالنص. /api/voice/confirm يبقى لتوافق preview_only القديم،
+ولا يظهر في الواجهة العادية. [تدقيق الاكتمال](../COMPLETION_AUDIT_AR.md).
 
 استخدم `session_id` نفسه لكل رسائل المحادثة وقرار الموافقة.
 نقطة الموافقة لا تقبل تفاصيل الحجز من المتصفح؛ تقرأ العملية المحفوظة.

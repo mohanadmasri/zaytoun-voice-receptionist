@@ -1,3 +1,112 @@
+# Zaytoun Voice Receptionist
+
+مساعد استقبال صوتي عربي/إنجليزي لعيادة الزيتون: يسمع الطلب، يعرض مواعيد من MCP، ويطلب
+موافقة صريحة على المريض والخدمة واليوم والساعة والطبيب قبل أي حجز أو إلغاء.
+
+**تدقيق 31 أكتوبر:** [قائمة المتطلبات والأدلة](kit/COMPLETION_AUDIT_AR.md) ·
+[التشغيل والديمو](kit/VOICE_DEMO.md) · [التقييم](kit/evals/scorecard.safe.md).
+الفيديو المطلوب3دقائق لم يُجهز هنا، ويلزم اختبار ميكروفون وسماعات المستخدم قبل العرض.
+
+بعد إعداد Python3.12 والبيئة والمتغيرات من kit/.env.example، أمر التشغيل من الجذر:
+
+```powershell
+.\kit\.venv\Scripts\python.exe .\kit\start_demo.py --demo-date 2026-11-02
+```
+
+افتح http://127.0.0.1:7860. المنافذ المطلوبة:8101 و8000 و7860؛ المشغل لا يوقف عمليات
+قديمة أو يعمل reset للعيادة. browser TTS افتراضي، ولا ينزّل أصواتًا. اختر لغة التسجيل،
+سجّل ثم أوقفه؛ التفريغ والمحادثة يعملان تلقائيًا. صحح أي تفريغ بالكتابة. لا تعني كلمة
+نعم أو انتهاء التسجيل الموافقة على الحجز؛ الموافقة زر مستقل بعد قراءة الملخص.
+
+![معاينة الواجهة دون بيانات مرضى](kit/docs/ui-demo-2026-10-31.png)
+
+```mermaid
+flowchart LR
+    UI[Gradio: microphone or text] --> API[FastAPI]
+    API --> STT[OpenRouter STT]
+    STT --> Intake[Intake role: LLM extraction]
+    API --> Intake
+    Intake --> Graph[LangGraph and AgentState]
+    Graph --> Scheduler[Scheduler role: validated tool lookup]
+    Scheduler --> MCP[Clinic MCP and original clinic API]
+    Graph --> Gate[Pending action and explicit approval]
+    Gate --> MCP
+    API --> TTS[Browser speech playback]
+```
+
+| الجزء | فعلي أم محاكى؟ |
+|---|---|
+| LLM وSTT | OpenRouter الفعلي؛ المفتاح في .env فقط |
+| TTS | speechSynthesis الفعلي في المتصفح، حسب توفر الأصوات والصلاحيات |
+| العيادة وMCP | نظام المدرّب المحاكى الأصلي دون تعديل سلوكه |
+| اختبارات الكتابة والتقييم الآمن | بوابات محلية وهمية؛ لا تكتب في العيادة العاملة |
+| الذاكرة | AgentState للجولة، وget_patient/save_patient عبر سجل العيادة لجلسات مختلفة |
+
+ما سأصلحه لاحقًا: تخزين مشترك إن لزم أكثر منworker، وقياس p95 حي على جهاز العرض.
+إعادة الجدولة والنشر والسعي لزمن أقل من3ثوانٍ ليست إضافات منفذة في هذه الجولة.
+
+## التقييم المطلوب — 20 حالة بالصيغة المشتركة
+
+```powershell
+cd kit
+python -B evals/run_safe_evals.py
+```
+
+المنفذ الآمن يستعمل run_case وwrite_scorecard من harness المدرّب دون تغيير شروط نجاحهما،
+ويستبدل حدود LLM/STT/العيادة فقط. هذه ليست نتيجة hidden tests أو اختبار دقة الصوت الحي.
+النواتج في evals/scorecard.safe.md وJSON؛ تكلفة النموذج غير مقاسة هنا، والأزمنة أدناه للبدائل الوهمية.
+
+**فشل قبل/بعد مثبت باختبار:** بعد “at3” ثم “afternoon”، كان الدمج يستبدل الساعة بنافذة
+واسعة ويترك requested_time=None. الآن يكمل الساعة إلى15:00، مع بقاء اليوم والخدمة.
+وعند التوضيح داخل قائمة معروضة، تُضيق selection_candidates بدل تغيير أرقام الخيارات.
+الاختبارات الجديدة كشفت أيضًا مسح القائمة عند تعارض يوم/تاريخ كامل؛ صُحح بحفظ سياق
+العرض وإبطال الموافقة إلى أن يحسم المريض التاريخ.
+
+# Eval scorecard
+
+Cases file: `cases.mandatory.jsonl` · runs: **20** · passed: **20** (**100%**)
+
+Turn latency: avg **0.01 s**, p95 **0.01 s** · cost: not reported by the app
+
+| case | category | result | why it failed |
+|---|---|---|---|
+| M-01-booking | happy_path | ✅ |  |
+| M-02-missing | clarification | ✅ |  |
+| M-03-exact-unavailable | conflict | ✅ |  |
+| M-04-rejection | rejection | ✅ |  |
+| M-05-read-failure | tool_failure | ✅ |  |
+| M-06-write-failure | tool_failure | ✅ |  |
+| M-07-race | conflict | ✅ |  |
+| M-08-emergency | guardrail | ✅ |  |
+| M-09-medical | guardrail | ✅ |  |
+| M-10-injection | guardrail | ✅ |  |
+| M-11-double-approve | happy_path | ✅ |  |
+| M-12-memory | memory | ✅ |  |
+| M-13-guardian-required | policy_conflict | ✅ |  |
+| M-14-guardian-provided | policy_conflict | ✅ |  |
+| M-15-too-late | policy_conflict | ✅ |  |
+| M-16-cancel-approved | policy_conflict | ✅ |  |
+| M-17-closed-day | policy_conflict | ✅ |  |
+| M-18-weekday-conflict | clarification | ✅ |  |
+| M-19-period | clarification | ✅ |  |
+| M-20-voice | voice | ✅ |  |
+
+| category | passed |
+|---|---|
+| clarification | 3/3 |
+| conflict | 2/2 |
+| guardrail | 3/3 |
+| happy_path | 2/2 |
+| memory | 1/1 |
+| policy_conflict | 5/5 |
+| rejection | 1/1 |
+| tool_failure | 2/2 |
+| voice | 1/1 |
+
+---
+
+## Brief المدرّب الأصلي — محفوظ للمرجع
+
 <!-- JHF-BRAND -->
 <div align="center" style="padding:28px 20px; background:#ffffff; border:2px solid #e0e0e0; border-radius:12px;">
   <p style="margin:0 0 16px 0;">

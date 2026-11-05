@@ -124,6 +124,8 @@ class ArabicGraphTests(unittest.IsolatedAsyncioTestCase):
         with patch("agent.graph.extract_request", new=fake_extract):
             response = await self.client.post("/api/chat", json={"session_id": session_id, "message": message})
         self.assertEqual(response.status_code, 200, response.text)
+        from test_support import confirm_phone_turn
+        response = await confirm_phone_turn(self.client, response, session_id)
         return response.json()
 
     async def test_exact_arabic_transcript_and_variants_reach_scheduler(self):
@@ -189,7 +191,7 @@ class ArabicGraphTests(unittest.IsolatedAsyncioTestCase):
         with patch("integrations.voice_adapter.transcribe", return_value=ARABIC_TRANSCRIPT), \
              patch("integrations.voice_adapter.speak", return_value=None), \
              patch("agent.graph.extract_request", new=fake_extract):
-            response = await self.client.post("/api/voice", data={"session_id": self.new_session()},
+            response = await self.client.post("/api/voice", data={"preview_only": "true", "session_id": self.new_session()},
                                               files={"audio": ("arabic.wav", recording.getvalue(), "audio/wav")})
             response = await self.client.post("/api/voice/confirm", json={"session_id": response.json()["session_id"], "transcript_token": response.json()["transcript_token"]})
         self.assertEqual(response.status_code, 200, response.text)

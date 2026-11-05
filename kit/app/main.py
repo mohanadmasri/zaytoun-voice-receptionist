@@ -24,6 +24,7 @@ from integrations.mcp_gateway import ClinicGateway
 from integrations.voice_adapter import VoiceAdapter, VoiceError, MAX_AUDIO_BYTES, EMPTY_AUDIO
 from core.session_store import session_store
 from agent.presentation import say
+from agent.patient_identity import valid_patient_name
 
 
 NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
@@ -103,6 +104,19 @@ class VoiceReviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     session_id: NonEmptyText
     transcript_token: NonEmptyText
+
+
+class SessionRequest(BaseModel):
+    session_id: NonEmptyText
+
+
+# بدء تسجيل جديد يبطل رد STT أقدم فقط، دون لمس الموعد أو هوية المريض.
+@app.post("/api/voice/discard")
+async def discard_voice(body: SessionRequest):
+    async with app.state.session_locks[body.session_id]:
+        app.state.voice_generations.pop(body.session_id, None)
+        app.state.voice_reviews.pop(body.session_id, None)
+    return {"status": "ok"}
 
 
 # تنشئ بوابة حقيقية لكل طلب؛ Depends تسمح باستبدالها ببوابة وهمية في الاختبار.
@@ -186,6 +200,7 @@ async def voice_error_response(session_id: str, error: VoiceError, transcript: s
 async def voice(
     audio: UploadFile = File(...), session_id: str = Form(...),
     language_hint: Literal["ar", "en"] | None = Form(None), continuation: bool = Form(False),
+    preview_only: bool = Form(False),
     gateway=Depends(get_gateway), adapter=Depends(get_voice_adapter),
 ):
     session_id = session_id.strip()
@@ -208,15 +223,23 @@ async def voice(
         digest = hashlib.sha256(data).hexdigest()
         if app.state.last_audio.get(session_id) == digest:
             raise VoiceError(409, "This recording was already sent. Please make a new recording / أعد التسجيل؛ هذا الملف أُرسل سابقًا.")
-        transcript = await adapter.transcribe(data, language_hint)
+        phone_mode = bool(original_state.get("selected_slot_id") and valid_patient_name(original_state.get("patient_name")) and
+                          (not original_state.get("patient_phone") or original_state.get("confirmed_phone") != original_state.get("patient_phone")))
+        transcript = await adapter.transcribe(data, language_hint, phone_mode=True) if phone_mode else await adapter.transcribe(data, language_hint)
         async with app.state.session_locks[session_id]:
             if app.state.voice_generations.get(session_id) != generation or state_fingerprint(session_id) != snapshot:
                 raise VoiceError(409, "A newer recording or message replaced this one / وصل تسجيل أو رسالة أحدث، أعد التسجيل.")
             token = uuid4().hex
-            app.state.voice_reviews[session_id] = {"token": token, "text": transcript, "language": language_hint,
+            spoken_language = language_hint or ("ar" if any('\u0600' <= c <= '\u06ff' for c in transcript) else "en")
+            app.state.voice_reviews[session_id] = {"token": token, "text": transcript, "language": spoken_language,
                 "snapshot": snapshot, "generation": generation, "created": perf_counter(), "continuation": continuation, "session_missing": session_missing}
             app.state.last_audio[session_id] = digest
-        language = language_hint or original_state.get("language", "en")
+        if not preview_only:
+            result = await confirm_voice(VoiceReviewRequest(session_id=session_id, transcript_token=token), gateway, adapter)
+            if isinstance(result, dict):
+                result["timings"] = {**getattr(adapter, "timings", {}), **result.get("timings", {})}
+            return result
+        language = spoken_language
         return {"session_id": session_id, "transcript": transcript, "transcript_token": token,
                 "needs_transcript_confirmation": True, "state": original_state.get("stage"), "language": language,
                 "session_reset": session_missing,

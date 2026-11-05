@@ -18,9 +18,16 @@ from core.contracts import PendingAction, ToolCall
 # يحدد شكل الحالة المشتركة التي تنتقل بين خطوات LangGraph.
 class AgentState(TypedDict, total=False):
     requires_guardian: bool
+    guardian_name: str | None
+    patient_age: int | None
+    cancellation_booking_id: str | None
+    cancellation_record: dict | None
+    cancellation_requested: bool
+    clinic_calendar: dict
     patient_age_unverified: bool
     patient_is_other: bool
     date_conflict: str | None
+    date_clarification_context: dict | None
     requested_date_change: str | None
     intake_ms: float
     # أسماء موثقة للعرض ومجموعة المرشحين عند التباس الاختيار، دون تغيير معرفات الحجز.
@@ -44,7 +51,7 @@ class AgentState(TypedDict, total=False):
     # ==================================================
 
     intent: Literal[
-        "booking", "medical_question", "off_topic", "other"
+        "booking", "cancel_booking", "medical_question", "off_topic", "other"
     ]
 
     safety: Literal[
@@ -91,6 +98,11 @@ class AgentState(TypedDict, total=False):
     # معلومات المريض والطبيب المستخدم للحجز الحالي.
     patient_name: str | None
     patient_phone: str | None
+    patient_phone_invalid: bool
+    phone_candidate: str | None
+    phone_error_reason: str | None
+    confirmed_phone: str | None
+    clinic_today: str | None
     provider_id: str | None
 
     # تذكير:
@@ -169,6 +181,9 @@ def create_initial_state(session_id: str) -> AgentState:
         # معلومات المريض غير معروفة بعد
         "patient_name": None,
         "patient_phone": None,
+        "phone_candidate": None,
+        "phone_error_reason": None,
+        "confirmed_phone": None,
         "provider_id": None,
                 # لا نعرف الطبيب المفضل قبل البحث عن المريض.
         "preferred_provider_id": None,

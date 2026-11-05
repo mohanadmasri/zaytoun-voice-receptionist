@@ -3,6 +3,7 @@
 # لا تستخدم LLM أو MCP أو أي API خارجي؛ كل محاولة كتابة تفشل فورًا في البوابة الوهمية.
 import re
 import unittest
+from test_support import confirm_phone_turn
 from copy import deepcopy
 from uuid import uuid4
 from unittest.mock import patch
@@ -137,6 +138,7 @@ class NumberedApiTests(unittest.IsolatedAsyncioTestCase):
         with patch("agent.graph.extract_request", new=fake_extract):
             response = await self.client.post("/api/chat", json={"session_id": self.session_id, "message": message})
         self.assertEqual(response.status_code, 200, response.text)
+        response = await confirm_phone_turn(self.client, response, self.session_id)
         return response.json()
 
     # تبدأ المحادثة من حالة فارغة وتثبت انتقال شروط البحث الصحيحة للأداة.
@@ -181,7 +183,7 @@ class NumberedApiTests(unittest.IsolatedAsyncioTestCase):
         data = await self.send("option 99")
         self.assertEqual(data["state"], "awaiting_slot_selection")
         self.assertIsNone(data.get("pending_action"))
-        self.assertIsNone(self.state()["selected_slot_id"])
+        self.assertEqual(self.state()["selected_slot_id"], "SL-C")
 
     async def test_all_number_forms_and_conflicts_over_http(self):
         await self.search()
@@ -191,8 +193,8 @@ class NumberedApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.state()["selected_slot_id"], "SL-B")
         for message in ("option 2 SL-A", "option 2 at 16:00", "option 1 or 2", "0", "4", "option 2.5", "SL-OLD"):
             data = await self.send(message)
-            self.assertEqual(data["state"], "awaiting_slot_selection", message)
-            self.assertIsNone(self.state()["selected_slot_id"], message)
+            self.assertEqual(data["state"], "awaiting_patient_details" if message in ("0", "4") else "awaiting_slot_selection", message)
+            self.assertEqual(self.state()["selected_slot_id"], "SL-B", message)
         data = await self.send("I choose 3:45 PM", time_text="3:45 PM")
         self.assertEqual(data["state"], "awaiting_slot_selection")
         self.assertEqual(self.state()["proposed_slots"], SLOTS)

@@ -134,7 +134,7 @@ class ComprehensiveConversationTests(unittest.IsolatedAsyncioTestCase):
         for language, transcript in (("ar", "I have a dental checkup with Dr. Aslan"), ("en", "بدي موعد فحص أسنان")):
             with patch("integrations.voice_adapter.transcribe", return_value=transcript) as stt, \
                  patch("agent.graph.extract_request") as extract:
-                response = await self.client.post("/api/voice", data={"session_id": self.session_id, "language_hint": language},
+                response = await self.client.post("/api/voice", data={"preview_only": "true", "session_id": self.session_id, "language_hint": language},
                                                   files={"audio": ("test.wav", wav_bytes(), "audio/wav")})
             self.assertEqual(response.status_code, 422, response.text)
             self.assertEqual(response.json()["transcript"], "")
@@ -154,10 +154,12 @@ class ComprehensiveConversationTests(unittest.IsolatedAsyncioTestCase):
                 return result
             with patch("integrations.voice_adapter.transcribe", return_value=transcript), \
                  patch("integrations.voice_adapter.speak", return_value=None), patch("agent.graph.extract_request", new=fake_extract):
-                response = await self.client.post("/api/voice", data={"session_id": self.session_id, "language_hint": language, "continuation": "true"},
+                response = await self.client.post("/api/voice", data={"preview_only": "true", "session_id": self.session_id, "language_hint": language, "continuation": "true"},
                                                   files={"audio": ("test.wav", wav_bytes() + language.encode(), "audio/wav")})
                 response = await self.client.post("/api/voice/confirm", json={"session_id": self.session_id, "transcript_token": response.json()["transcript_token"]})
             self.assertEqual(response.status_code, 200, response.text)
+            from test_support import confirm_phone_turn
+            response = await confirm_phone_turn(self.client, response, self.session_id)
             self.assertEqual(response.json()["language"], language)
             self.assertEqual(response.json()["state"], expected)
             self.assertFalse(response.json()["session_reset"])

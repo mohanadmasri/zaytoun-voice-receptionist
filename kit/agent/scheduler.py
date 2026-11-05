@@ -15,6 +15,7 @@ from agent.slot_handoff import (
 from core.contracts import ClinicGateway
 from agent.slot_selection import format_slot_options
 from agent.presentation import say
+from datetime import date, timedelta
 
 
 # إرسال طلب البحث الحقيقي إلى العيادة عبر MCP.
@@ -149,6 +150,7 @@ async def schedule(
     # حفظ حالة البحث عن أطباء بديلين.
     used_alternatives = False
     used_time_alternatives = False
+    used_date_alternatives = False
 
     try:
         # البحث الأول باستخدام شروط المريض.
@@ -223,6 +225,24 @@ async def schedule(
                 search_state = near_state
                 used_time_alternatives = True
 
+        # اليوم المغلق موثق بتقويم العيادة؛ نعرض أقرب يوم لاحق من نتائج الأداة فقط دون اختياره.
+        calendar = state.get("clinic_calendar") or {}
+        hours = calendar.get("opening_hours") or {}
+        requested_day = date.fromisoformat(state["requested_date"])
+        weekday = requested_day.strftime("%A").lower()
+        if not matching_slots and weekday in hours and not hours[weekday]:
+            for offset in range(1, 4):
+                next_day = (requested_day + timedelta(days=offset)).isoformat()
+                if calendar.get("last_bookable_day") and next_day > calendar["last_bookable_day"]:
+                    break
+                next_state = {**state, "requested_date": next_day}
+                next_result = await find_available_slots(gateway, build_find_slots_args(next_state, limit=5))
+                matching_slots = filter_matching_slots(next_state, extract_slots(next_result))
+                if matching_slots:
+                    search_state = next_state
+                    used_date_alternatives = True
+                    break
+
     # التعامل مع استجابة غير صحيحة من العيادة.
     except ValueError:
         return {
@@ -248,7 +268,9 @@ async def schedule(
         }
 
     # توضيح أن بعض المواعيد من البحث البديل.
-    if used_time_alternatives:
+    if used_date_alternatives:
+        reply = say(state, "The clinic is closed on your requested day. These later dates are available:\n", "العيادة مسكّرة باليوم المطلوب. هاي خيارات بأقرب يوم لاحق:\n")
+    elif used_time_alternatives:
         from agent.presentation import display_time
         requested_label = display_time(state["requested_time"], state.get("language", "en"))
         reply = say(state, f"{requested_label} is unavailable. These nearby times are available:\n",

@@ -13,11 +13,14 @@ from typing import Literal
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 import re
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, model_validator, field_validator, ValidationError
+import logging
 from agent.state import AgentState
 from agent.service_mapping import explicit_service_evidence, match_service
-from agent.times import normalize_time
-from agent.patient_identity import valid_patient_name, third_party_request, clear_patient
+from agent.times import normalize_time, period_reply
+from agent.patient_identity import (valid_patient_name, third_party_request, clear_patient, normalize_patient_phone,
+                                    explicit_phone, spoken_phone_digits, phone_validation_issue, patient_name_noise,
+                                    phone_confirmation_reply)
 from agent.dates import ENGLISH_MONTHS, ARABIC_MONTHS
 from agent.slot_selection import extract_time, find_slots_by_id, extract_option_numbers, has_slot_reference
 # تحميل متغيرات البيئة من ملف .env
@@ -37,9 +40,12 @@ class IntakeResult(BaseModel):
     time_text: str | None = None
     patient_name: str | None = None
     patient_phone: str | None = None
+    guardian_name: str | None = None
+    patient_age: int | None = None
+    cancellation_booking_id: str | None = None
 
     # نوع الطلب الأساسي الذي فهمه LLM.
-    intent: Literal["booking", "medical_question", "off_topic", "other"] = "other"
+    intent: Literal["booking", "cancel_booking", "medical_question", "off_topic", "other"] = "other"
 
     # درجة أو نوع الخطر الطبي في الرسالة.
     safety: Literal[
@@ -48,6 +54,12 @@ class IntakeResult(BaseModel):
 
     # هل حاول المستخدم تجاوز تعليمات النظام؟
     injection_detected: bool = False
+
+    # unknown تصنيف غياب نية من المزود، يعادل other؛ لا نحول أخطاء/تصنيفات أخرى إلى حجز.
+    @field_validator("intent", mode="before")
+    @classmethod
+    def normalize_unknown_intent(cls, value):
+        return "other" if value == "unknown" else value
 
 
     # ==================================================
@@ -156,15 +168,20 @@ async def extract_request(message: str) -> IntakeResult:
     "Return a JSON object with these fields:"
     "language, service_text, date_text, time_text, "
     "patient_name, patient_phone, provider_text, provider_any, "
-    "intent, safety, injection_detected. "
+    "intent, safety, injection_detected, guardian_name, patient_age, cancellation_booking_id. "
+    "Extract the actual patient's full name separately from guardian_name. "
+    "patient_age is an integer only if explicitly stated. Never use a relationship as a name. "
+    "For an explicit cancellation request use intent=cancel_booking and copy the BK- booking reference if provided. "
 
     # ==================================================
     # 2. قواعد اللغة والبيانات الناقصة
     # ==================================================
     "Use null for missing appointment information. "
+    "patient_phone must be a JSON string, never a number. Preserve every stated digit including leading zeros; never guess missing digits. "
     "Supported languages are English (en) and Arabic (ar). "
     "Use unsupported only for clearly unsupported languages. "
-    "Use unknown for very short or ambiguousmessages. "
+    "Use language='unknown' for very short or ambiguous messages. "
+    "For an unclear intent use intent='other', never intent='unknown'. "
     "Keep date and time expressions as written by the user. "
     "Separate dates from times whenever possible. "
     "Put only the date or day in date_text. "
@@ -222,7 +239,7 @@ async def extract_request(message: str) -> IntakeResult:
     # 5. تصنيف نوع الرسالة
     # ==================================================
     "Classify the user's intent as one of: "
-    "booking, medical_question, off_topic, other. "
+    "booking, cancel_booking, medical_question, off_topic, other. "
     "A request for an appointment is booking, "
     "even if symptoms are mentioned. "
     "Questions unrelated to the clinic, suchas "
@@ -276,7 +293,14 @@ async def extract_request(message: str) -> IntakeResult:
         raise ValueError("The model returnedan empty response")
 
     # تحويل JSON إلى IntakeResult والتحقق منتوافق البيانات مع النموذج
-    return IntakeResult.model_validate_json(content)
+    try:
+        return IntakeResult.model_validate_json(content)
+    except ValidationError as error:
+        # الحقل ونوع الخطأ فقط؛ لا نص مزود أو أرقام مرضى أو مفاتيح في السجل.
+        issues = [{"field": ".".join(map(str, item["loc"])), "type": item["type"]}
+                  for item in error.errors(include_input=False, include_context=False, include_url=False)]
+        logging.getLogger(__name__).warning("intake_validation_failed issues=%s", issues)
+        raise
 
 
 # ==================================================
@@ -295,7 +319,7 @@ async def extract_request(message: str) -> IntakeResult:
 def is_slot_selection_reply(state: AgentState, result: IntakeResult) -> bool:
     if state.get("stage") not in (
         "slots_proposed", "awaiting_slot_selection", "slot_selected",
-        "awaiting_patient_details", "awaiting_approval",
+        "awaiting_patient_details", "awaiting_phone_confirmation", "awaiting_approval",
     ) or not state.get("proposed_slots"):
         return False
 
@@ -334,8 +358,62 @@ def update_state_from_intake(
     # ننسخ الحالة كي لا نعدّل النسخة الأصلية مباشرة.
     updated_state = state.copy()
     message = state.get("current_message", "")
+    phone_context = bool(state.get("selected_slot_id") and valid_patient_name(state.get("patient_name")) and
+                         (not state.get("patient_phone") or state.get("confirmed_phone") != state.get("patient_phone")))
+    confirmation = phone_confirmation_reply(message) if state.get("stage") == "awaiting_phone_confirmation" else None
+    if confirmation is not None:
+        result = result.model_copy(update={key: None for key in ("patient_name", "patient_phone", "date_text", "time_text", "service_text", "provider_text")})
+        if confirmation and normalize_patient_phone(state.get("patient_phone")):
+            updated_state["confirmed_phone"] = state["patient_phone"]
+        elif not confirmation:
+            updated_state.update({"patient_phone": None, "confirmed_phone": None, "phone_candidate": None})
+    elif patient_name_noise(state, message):
+        result = result.model_copy(update={key: None for key in ("patient_name", "patient_phone", "date_text", "time_text", "service_text", "provider_text")})
+    elif phone_context and (digits := spoken_phone_digits(message)) is not None:
+        result = result.model_copy(update={"patient_phone": digits, "patient_name": None, "time_text": None, "date_text": None, "provider_text": None})
+    if result.patient_phone:
+        candidate = explicit_phone(message) or result.patient_phone
+        phone = normalize_patient_phone(candidate)
+        updated_state["phone_candidate"] = candidate[:48]
+        updated_state["phone_error_reason"] = phone_validation_issue(candidate)
+        updated_state["patient_phone_invalid"] = phone is None
+        if phone != state.get("patient_phone"):
+            updated_state["confirmed_phone"] = None
+            updated_state["pending_action"] = None
+        result = result.model_copy(update={"patient_phone": phone})
+        if phone is None:
+            updated_state["patient_phone"] = None
+            updated_state["pending_action"] = None
+    period = period_reply(message)
+    if period and state.get("selection_candidates") and state.get("proposed_slots"):
+        result = result.model_copy(update={"time_text": None})
+    elif period and normalize_time(state.get("time_text"))["kind"] == "ambiguous":
+        result = result.model_copy(update={"time_text": (state.get("time_text") or "") + " " + period})
+    if result.date_text and state.get("requested_date") and result.date_text != state.get("date_text"):
+        updated_state["requested_date_change"] = state["requested_date"]
+        updated_state["date_clarification_context"] = {key: state.get(key) for key in (
+            "date_text", "requested_date", "proposed_slots", "selected_slot_id", "selection_candidates", "offer_context")}
     if result.date_text:
         weekday_only = re.fullmatch(r"(?:يوم\s+)?(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|الاثنين|الثلاثاء|الأربعاء|الخميس|الجمعة|السبت|الأحد)[.!؟?]?", result.date_text.strip(), re.I)
+        if weekday_only and state.get("date_conflict") and re.search(r"\b(?:I mean|I meant)\b|قصدي|أقصد|اقصد", message, re.I):
+            from agent.dates import normalize_date
+            from datetime import date, timedelta
+            weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+            arabic_weekdays = ["الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت", "الأحد"]
+            supplied = result.date_text.strip().strip(".!؟?").removeprefix("يوم ").casefold()
+            source = re.sub(r"^(?:يوم\s+)?(?:" + "|".join(weekdays + arabic_weekdays) + r")[,،]?\s+", "", state["date_conflict"], flags=re.I)
+            today = state.get("clinic_today")
+            anchor = normalize_date(source, today) if today else None
+            if not anchor and state.get("requested_date"):
+                anchor = state["requested_date"]
+            index = weekdays.index(supplied) if supplied in weekdays else arabic_weekdays.index(supplied)
+            if anchor and today:
+                base = date.fromisoformat(anchor)
+                resolved = base + timedelta(days=index - base.weekday())
+                if resolved >= date.fromisoformat(today):
+                    result = result.model_copy(update={"date_text": resolved.isoformat()})
+                    weekday_only = None
+                    updated_state["date_conflict"] = None
         if weekday_only and state.get("requested_date") and re.search(r"\d|" + "|".join(re.escape(m) for m in (*ENGLISH_MONTHS, *ARABIC_MONTHS)), state.get("date_text") or "", re.I):
             from datetime import date
             day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -350,8 +428,9 @@ def update_state_from_intake(
             updated_state["date_conflict"] = None
     if third_party_request(message):
         updated_state = clear_patient(updated_state)
+        updated_state["guardian_name"] = None
         updated_state["patient_is_other"] = True
-        if result.patient_phone and result.patient_phone not in message:
+        if result.patient_phone and explicit_phone(message) != result.patient_phone:
             result = result.model_copy(update={"patient_phone": None})
         # son لا يثبت أن العمر دون16؛ نطلب العمر بدل اختراع سياسة لجميع الأبناء.
         updated_state["patient_age_unverified"] = bool(re.search(r"son|daughter|child|ابني|بنتي|طفلي", message, re.I))
@@ -360,17 +439,33 @@ def update_state_from_intake(
     if updated_state.get("patient_age_unverified"):
         age = re.search(r"\b(\d{1,3})\s*(?:years? old|year old|سنة|سنوات)|(?:عمره|عمرها|age is|aged)\s*(\d{1,3})", message, re.I)
         if age:
-            updated_state["requires_guardian"] = int(age.group(1) or age.group(2)) < 16
+            updated_state["patient_age"] = int(age.group(1) or age.group(2))
+            updated_state["requires_guardian"] = updated_state["patient_age"] < 16
             updated_state["patient_age_unverified"] = False
+    if result.patient_age is not None and 0 <= result.patient_age <= 120:
+        updated_state["patient_age"] = result.patient_age
+        updated_state["requires_guardian"] = result.patient_age < 16
+        updated_state["patient_age_unverified"] = False
+    if result.guardian_name and valid_patient_name(result.guardian_name):
+        if updated_state.get("guardian_name") != result.guardian_name:
+            updated_state["pending_action"] = None
+        updated_state["guardian_name"] = result.guardian_name
+    if result.cancellation_booking_id:
+        updated_state["cancellation_booking_id"] = result.cancellation_booking_id
+    if result.intent == "cancel_booking":
+        updated_state["pending_action"] = None
+        updated_state["cancellation_requested"] = True
+    elif result.service_text and state.get("cancellation_requested"):
+        updated_state["cancellation_requested"] = False
+        updated_state["cancellation_booking_id"] = None
+        updated_state["pending_action"] = None
     if result.patient_name and not valid_patient_name(result.patient_name):
         result = result.model_copy(update={"patient_name": None})
         updated_state["patient_name"] = None
         updated_state["pending_action"] = None
     if result.patient_name and state.get("patient_name") and result.patient_name != state["patient_name"]:
-        updated_state = clear_patient(updated_state)
-        # رقم قديم لا ينتقل إلى مريض جديد إلا إذا ذكره المريض صراحة في هذا الدور.
-        if result.patient_phone == state.get("patient_phone") and result.patient_phone not in message:
-            result = result.model_copy(update={"patient_phone": None})
+        # تصحيح الاسم لا يبدّل المريض تلقائيًا؛ الطلب الصريح لشخص آخر عولج أعلاه.
+        updated_state["pending_action"] = None
     evidence = explicit_service_evidence(state.get("current_message", ""))
     if evidence and result.language != "unsupported":
         # نص صريح فقط؛ فحوص السلامة والنية لا تتغير، والمعرف يُتحقق منه لاحقًا بالكتالوج.
@@ -470,8 +565,6 @@ def update_state_from_intake(
 
         # لا ننقل اسم مريض قديم إلى رقم هاتف جديد دون تصريح.
         # الهاتف الأول يكمل بيانات المريض نفسه؛ تغيير رقم قديم يعني هوية جديدة.
-        if state.get("patient_phone") and not result.patient_name:
-            updated_state["patient_name"] = None
 
     # تحديث اختيار الطبيب، لكن فقط إذا تغيّر بالفعل.
     if result.provider_text and result.provider_text.strip():
@@ -500,7 +593,7 @@ def update_state_from_intake(
     # نحتفظ بمرحلة المتابعة فقط إذا بقيت المقترحات صالحة بعد الدمج.
     if state.get("stage") in (
         "slots_proposed", "awaiting_slot_selection", "slot_selected",
-        "awaiting_patient_details", "awaiting_approval",
+        "awaiting_patient_details", "awaiting_phone_confirmation", "awaiting_approval",
     ) and updated_state.get("proposed_slots"):
         updated_state["stage"] = state["stage"]
 

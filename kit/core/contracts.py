@@ -18,6 +18,7 @@ class ToolCall(TypedDict):
 
 
 class PendingAction(TypedDict):
+    memory: NotRequired[dict[str, Any]]
     action_id: str
     type: Literal["create_booking", "cancel_booking"]
     summary: str

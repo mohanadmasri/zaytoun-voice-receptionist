@@ -14,13 +14,14 @@ from uuid import uuid4
 from agent.state import AgentState
 from core.contracts import PendingAction
 import asyncio
+import logging
 from time import perf_counter
 
 from core.contracts import ChatResponse, ClinicGateway
 from core.session_store import session_store
 from agent.slot_handoff import slot_matches_offer
 from agent.presentation import say, booking_summary
-from agent.patient_identity import valid_patient_name
+from agent.patient_identity import valid_patient_name, normalize_patient_phone
 # تجهيز طلب حجز يحتاج إلى موافقة المريض.
 def prepare_booking_action(state: AgentState) -> PendingAction:
 
@@ -39,10 +40,14 @@ def prepare_booking_action(state: AgentState) -> PendingAction:
 
     if not valid_patient_name(state.get("patient_name")):
         raise ValueError("The actual patient's full name is required")
+    if normalize_patient_phone(state.get("patient_phone")) is None:
+        raise ValueError("A valid clinic phone number is required")
+    if state.get("confirmed_phone") != state.get("patient_phone"):
+        raise ValueError("The recognized phone number must be confirmed first")
     if state.get("date_conflict"):
         raise ValueError("The requested date must be clarified")
     # لا نفعل مسار الأطفال قبل إضافة التحقق من ولي الأمر
-    if state["service_id"] == "pediatrics_visit" or state.get("requires_guardian") or state.get("patient_age_unverified"):
+    if state.get("patient_age_unverified") or ((state["service_id"] == "pediatrics_visit" or state.get("requires_guardian")) and not valid_patient_name(state.get("guardian_name"))):
         raise ValueError("Guardian verification is required")
 
     # التأكد أن الموعد المختار موجود في قائمة المواعيد المقترحة
@@ -60,7 +65,7 @@ def prepare_booking_action(state: AgentState) -> PendingAction:
 
     
     # تذكير — التأكد من تطابق تاريخ الموعد.
-    if selected_slot.get("date") != state["requested_date"]:
+    if selected_slot.get("date") != state["requested_date"] and not slot_matches_offer(state, selected_slot):
         raise ValueError("Selected slot date does not match")
 
     # تذكير — التأكد من تطابق الوقت والطبيب والخدمة.
@@ -85,10 +90,22 @@ def prepare_booking_action(state: AgentState) -> PendingAction:
         "patient_name": state["patient_name"],
         "patient_phone": state["patient_phone"],
     }
+    if state.get("guardian_name") and (state.get("requires_guardian") or state["service_id"] == "pediatrics_visit"):
+        payload["guardian_name"] = state["guardian_name"]
 
     # إعادة نفس العملية المعلقة إذا لم تتغير تفاصيل الحجز
     existing = state.get("pending_action")
     summary = booking_summary(state, selected_slot)
+    if payload.get("guardian_name"):
+        summary += say(state, f" Guardian: {payload['guardian_name']}.", f" ولي الأمر: {payload['guardian_name']}.")
+    memory = {"phone": payload["patient_phone"], "name": payload.get("guardian_name") or payload["patient_name"],
+              "language": state.get("language") if state.get("language") in ("ar", "en") else None}
+    if state.get("provider_choice") == "specific":
+        memory["preferred_provider_id"] = selected_slot.get("provider_id")
+        from agent.presentation import provider_label
+        label = provider_label(selected_slot, state)
+        summary += say(state, f" Remember {label} as your preferred doctor.", f" حفظ {label} كطبيب مفضّل.")
+    summary += say(state, " Remember the name and language for future visits.", " حفظ الاسم واللغة للزيارات القادمة.")
 
     if (
         existing is not None
@@ -106,6 +123,7 @@ def prepare_booking_action(state: AgentState) -> PendingAction:
         "type": "create_booking",
         "summary": summary,
         "payload": payload,
+        "memory": memory,
     }
 
     return pending_action
@@ -186,6 +204,9 @@ async def handle_approval(
             )
 
         # هذه المرحلة تدعم إنشاء الحجز فقط.
+        if pending["type"] == "cancel_booking":
+            from actions.cancellation import approve_cancellation
+            return await approve_cancellation(state, pending, approved, gateway)
         if pending["type"] != "create_booking":
             return _approval_response(
                 session_id,
@@ -212,7 +233,16 @@ async def handle_approval(
 
         # الحالة الثانية: المريض وافق.
         payload = pending["payload"]
-        if not valid_patient_name(state.get("patient_name")) or state.get("requires_guardian") or state.get("patient_age_unverified") or state.get("date_conflict"):
+        if state.get("confirmed_phone") != state.get("patient_phone"):
+            state.update({"pending_action": None, "stage": "awaiting_phone_confirmation"})
+            session_store.save(state)
+            return _approval_response(session_id, state, say(state, "Please confirm the recognized phone number before reviewing this booking.", "أكد رقم التلفون المسموع قبل مراجعة الحجز، لو سمحت."))
+        if normalize_patient_phone(state.get("patient_phone")) is None:
+            state.update({"pending_action": None, "patient_phone": None, "patient_phone_invalid": True, "stage": "awaiting_patient_details"})
+            session_store.save(state)
+            return _approval_response(session_id, state, say(state, "Please provide a valid phone number starting with 0 or +970/+972. No booking was made.", "أعطيني رقم تلفون صحيح يبدأ بصفر أو +970/+972. ما تم أي حجز."))
+        guardian_required = state.get("requires_guardian") or state.get("service_id") == "pediatrics_visit"
+        if not valid_patient_name(state.get("patient_name")) or (guardian_required and not valid_patient_name(state.get("guardian_name"))) or state.get("patient_age_unverified") or state.get("date_conflict"):
             state["pending_action"] = None
             state["stage"] = "awaiting_patient_details"
             session_store.save(state)
@@ -224,6 +254,7 @@ async def handle_approval(
             or payload.get("slot_id") != state.get("selected_slot_id")
             or payload.get("patient_name") != state.get("patient_name")
             or payload.get("patient_phone") != state.get("patient_phone")
+            or payload.get("guardian_name") != (state.get("guardian_name") if guardian_required else None)
         ):
             return _approval_response(
                 session_id,
@@ -240,7 +271,6 @@ async def handle_approval(
                 slot
                 for slot in state.get("proposed_slots", [])
                 if slot.get("slot_id") == payload["slot_id"]
-                and slot.get("date") == state.get("requested_date")
             ),
             None,
         )
@@ -262,6 +292,22 @@ async def handle_approval(
             )
 
         # تنفيذ الحجز باستخدام معرف العملية نفسه.
+        # فحص السعة الموثقة قبل الكتابة؛ لا نعامل عطل الذاكرة كمريض جديد أو نتجاوز الحد.
+        maximum = ((state.get("clinic_calendar") or {}).get("policies") or {}).get("max_upcoming_bookings_per_patient")
+        if isinstance(maximum, int) and maximum > 0:
+            try:
+                patient = await gateway.call_read("get_patient", {"phone": payload["patient_phone"]})
+            except Exception:
+                patient = {"ok": False}
+            if patient.get("ok") and isinstance(patient.get("upcoming_bookings"), list):
+                if len(patient["upcoming_bookings"]) >= maximum:
+                    state.update({"pending_action": None, "stage": "awaiting_patient_details"})
+                    session_store.save(state)
+                    return _approval_response(session_id, state, say(state,
+                        f"The clinic allows at most {maximum} upcoming appointments per phone. Please contact the clinic; no new booking was made.",
+                        f"العيادة بتسمح بحد أقصى {maximum} مواعيد قادمة لكل تلفون. تواصل مع العيادة؛ ما تم حجز جديد."))
+            elif patient.get("error", {}).get("code") != "unknown_patient":
+                return _approval_response(session_id, state, say(state, "I could not verify the clinic policy. Please try again; no booking was attempted.", "ما قدرت أتحقق من سياسة العيادة. جرّب مرة تانية؛ ما حاولنا نحجز."))
         start = perf_counter()
 
         try:
@@ -300,6 +346,16 @@ async def handle_approval(
         # الحجز نجح.
         if success:
 
+            # الذاكرة جزء ظاهر من الموافقة؛ لا حفظ قبل نجاح الحجز ولا إعادة حجز إن فشل حفظ الذاكرة.
+            if pending.get("memory"):
+                memory_started = perf_counter()
+                try:
+                    saved = await gateway.call_write("save_patient", pending["memory"])
+                    memory_ok = isinstance(saved, dict) and saved.get("ok") is True
+                except Exception:
+                    memory_ok = False
+                tool_calls.append({"tool": "save_patient", "ok": memory_ok, "ms": round((perf_counter() - memory_started) * 1000, 2)})
+
             state["pending_action"] = None
             state["stage"] = "booking_confirmed"
             state["proposed_slots"] = []
@@ -311,7 +367,7 @@ async def handle_approval(
             return _approval_response(
                 session_id,
                 state,
-                say(state, f"Your appointment is confirmed. Booking ID: {booking['booking_id']}", f"تم تأكيد موعدك. رقم الحجز: {booking['booking_id']}"),
+                say(state, f"Your appointment is confirmed. Booking ID: {booking['booking_id']}", f"تم تأكيد موعدك. رقم الحجز: {booking['booking_id']}") + (say(state, " Your visit is booked, but we could not save your preferences.", " الموعد مؤكد، لكن تعذر حفظ التفضيلات.") if pending.get("memory") and not memory_ok else ""),
                 tool_calls,
                 booking,
             )
@@ -319,6 +375,27 @@ async def handle_approval(
         # الموعد أصبح محجوزًا لشخص آخر.
         error = booking.get("error", {}) if isinstance(booking, dict) else {}
         error_code = error.get("code") if isinstance(error, dict) else None
+        if error_code == "policy_violation" or (isinstance(booking, dict) and booking.get("status") == 422):
+            from integrations.mcp_gateway import sanitized_clinic_error
+            detail = sanitized_clinic_error(booking, payload)
+            state.update({"pending_action": None, "stage": "awaiting_patient_details"})
+            session_store.save(state)
+            response = _approval_response(session_id, state, say(state,
+                "The clinic rejected this booking under its policy. Review the details or contact the clinic; no booking was confirmed.",
+                "العيادة رفضت الحجز حسب سياستها. راجع التفاصيل أو تواصل مع العيادة؛ ما تأكد أي حجز."), tool_calls)
+            response["validation_error"] = detail
+            return response
+        if error_code in ("invalid_phone", "invalid_request"):
+            # لا نسجل رسالة العيادة الخام، لأنها قد تعيد رقم الهاتف داخل النص.
+            logging.getLogger(__name__).warning("booking_validation_rejected code=%s", error_code)
+            state.update({"pending_action": None, "stage": "awaiting_patient_details"})
+            if error_code == "invalid_phone":
+                state["patient_phone"] = None
+                state["patient_phone_invalid"] = True
+            session_store.save(state)
+            return _approval_response(session_id, state, say(state,
+                f"The clinic rejected the booking details ({error_code}). Please correct the details and review again. No booking was made.",
+                f"العيادة رفضت بيانات الحجز ({error_code}). صحح البيانات وراجعها مرة تانية. ما تم أي حجز."), tool_calls)
 
         if error_code == "slot_taken":
 

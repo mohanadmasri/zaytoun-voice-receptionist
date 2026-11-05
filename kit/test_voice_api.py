@@ -19,6 +19,7 @@ from core.session_store import session_store
 from integrations.voice_adapter import VoiceAdapter, VoiceError, validate_audio
 from test_numbered_slots import FakeGateway, SLOTS
 from voice import STTError
+from test_support import confirm_phone_turn
 
 
 # تنشئ إشارة PCM قصيرة غير صامتة؛ ليست كلامًا حقيقيًا، وخدمة STT وهمية في هذه الاختبارات.
@@ -136,7 +137,7 @@ class VoiceApiTests(unittest.IsolatedAsyncioTestCase):
                                       files={"audio": ("recording.wav", wav_bytes() + uuid4().bytes, "audio/wav")})
         if response.status_code == 200 and response.json().get("transcript_token"):
             response = await self.client.post("/api/voice/confirm", json={"session_id": self.session_id, "transcript_token": response.json()["transcript_token"]})
-        return response
+        return await confirm_phone_turn(self.client, response, self.session_id)
 
     # تبدأ البحث من صوت وتتحقق من بقاء المواعيد بعد الثالثة ومن ترتيب الخيارات.
     async def search(self):

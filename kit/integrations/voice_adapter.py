@@ -65,7 +65,7 @@ def validate_audio(data: bytes) -> None:
 class VoiceAdapter:
     # تستقبل التسجيل كـbytes وتعيد النص الأصلي كما فرغه STT دون تبديل أسماء أو أرقام.
     # المهلة تمنع تعليق HTTP؛ انتهاء المهلة لا يستطيع إيقاف thread الشبكة بالقوة.
-    async def transcribe(self, data: bytes, language_hint: str | None = None) -> str:
+    async def transcribe(self, data: bytes, language_hint: str | None = None, phone_mode: bool = False) -> str:
         started = perf_counter()
         validate_audio(data)
         self.timings = {"audio_validation_ms": round((perf_counter() - started) * 1000, 2)}
@@ -73,7 +73,7 @@ class VoiceAdapter:
         # القياس محلي للـthread الحالي، ولا نقرأ last_usage العامة التي قد تخص جلسة ثانية.
         def run_stt():
             request_metrics.encoding_ms = None
-            text = transcribe(data, language_hint)
+            text = transcribe(data, language_hint, phone_mode=True) if phone_mode else transcribe(data, language_hint)
             return text, request_metrics.encoding_ms
         try:
             text, encoding_ms = await asyncio.wait_for(

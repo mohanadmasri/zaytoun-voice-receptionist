@@ -21,7 +21,7 @@ from langgraph.runtime import Runtime
 from agent.state import AgentState
 from agent.intake import extract_request, update_state_from_intake
 from agent.intake import IntakeResult
-from agent.patient_identity import valid_patient_name
+from agent.patient_identity import valid_patient_name, normalize_patient_phone, patient_name_noise, spoken_phone_digits
 import re
 from agent.dates import normalize_date
 from agent.times import normalize_time
@@ -190,11 +190,21 @@ async def normalize_date_node(
         )
     except ValueError:
         resolved_date = None
+    if resolved_date is None:
+        explicit = re.fullmatch(r"(?:يوم\s+)?(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|الاثنين|الثلاثاء|الأربعاء|الخميس|الجمعة|السبت|الأحد)[,،]?\s+(.+)", date_text.strip(), re.I)
+        if explicit and normalize_date(explicit.group(1), clinic["today"]):
+            # نحفظ العرض والاختيار السابقين أثناء السؤال، لكن لا تبقى موافقة قابلة للتنفيذ.
+            prior = state.get("date_clarification_context") or {}
+            return {**prior, "requested_date": prior.get("requested_date", state.get("requested_date_change")), "date_conflict": date_text,
+                    "pending_action": None, "tool_calls": calls}
 
     # تخزين التاريخ النهائي داخل AgentState
     return {
         "requested_date": resolved_date,
+        "clinic_today": clinic["today"],
+        "date_clarification_context": None,
         "provider_catalog": clinic.get("providers", []),
+        "clinic_calendar": {key: clinic.get(key) for key in ("opening_hours", "last_bookable_day", "policies")},
         "tool_calls": calls,
     }
 
@@ -286,6 +296,7 @@ async def service_mapping_node(
 
     return {
         "service_id": service_id,
+        "patient_age_unverified": False if service_id == "pediatrics_visit" else state.get("patient_age_unverified", False),
         "service_catalog": result["services"],
         "tool_calls": calls,
     }
@@ -332,13 +343,15 @@ def route_after_intake(
     ):
         return "safety"
 
+    if state.get("intent") == "cancel_booking" or state.get("cancellation_requested"):
+        return "cancellation"
     if state.get("date_conflict"):
         # لا نعيد تطبيع تاريخ مؤكد أو نستدعي العيادة قبل حسم تعارض اليوم الجديد.
         return "date_conflict"
     # نوجّه المتابعة بعد فحوص السلامة، بشرط بقاء المواعيد صالحة.
     if state.get("proposed_slots") and state.get("stage") in (
         "slots_proposed", "awaiting_slot_selection", "slot_selected",
-        "awaiting_patient_details", "awaiting_approval",
+        "awaiting_patient_details", "awaiting_phone_confirmation", "awaiting_approval",
     ) and not state.get("date_conflict"):
         return "slot_followup"
 
@@ -353,11 +366,17 @@ def slot_followup_node(state: AgentState) -> dict:
     updates = {}
     message = state.get("current_message", "")
     choosing = has_slot_reference(state, message)
+    if patient_name_noise(state, message) or (state.get("selected_slot_id") and valid_patient_name(state.get("patient_name")) and
+        state.get("confirmed_phone") != state.get("patient_phone") and spoken_phone_digits(message) is not None):
+        choosing = False
     if not choosing and not state.get("selected_slot_id"):
         return {"reply": say(state, "Your appointment options are still available. Which option would you prefer?", "خيارات موعدك بعدها موجودة. أي خيار بناسبك؟")}
     if choosing or not state.get("selected_slot_id"):
         updates = select_slot(state, message)
         if updates.get("stage") != "slot_selected":
+            old_slot = next((s for s in state.get("proposed_slots", []) if s.get("slot_id") == state.get("selected_slot_id")), None)
+            if old_slot and slot_matches_offer(state, old_slot):
+                updates["selected_slot_id"] = state["selected_slot_id"]
             return {**updates, "pending_action": None}
 
     # دمج محلي لأن LangGraph يطبّق تحديثات العقدة بعد إرجاعها فقط.
@@ -368,11 +387,31 @@ def slot_followup_node(state: AgentState) -> dict:
         return {"stage": "awaiting_slot_selection", "selected_slot_id": None,
                 "pending_action": None, "reply": say(state, "Please choose one of the available appointments.", "اختار موعد من الخيارات المتاحة، لو سمحت.")}
 
-    if not valid_patient_name(selected_state.get("patient_name")) or not selected_state.get("patient_phone"):
+    if not valid_patient_name(selected_state.get("patient_name")) or normalize_patient_phone(selected_state.get("patient_phone")) is None:
+        phone_question = say(state, "What is your phone number?", "شو رقم تلفونك؟")
+        if selected_state.get("patient_phone_invalid") or selected_state.get("patient_phone"):
+            phone_question = say(state, "Please provide a valid phone number starting with 0 or +970/+972.", "أعطيني رقم تلفون صحيح يبدأ بصفر أو +970/+972.")
+            reason = selected_state.get("phone_error_reason")
+            descriptions = {"length": ("The number has the wrong length; local numbers must have 9 or 10 digits.", "طول الرقم غير صحيح؛ الرقم المحلي لازم يكون 9 أو 10 خانات."),
+                            "prefix": ("The prefix is not accepted; use 0 or +970/+972.", "بداية الرقم غير مقبولة؛ استخدم 0 أو +970/+972."),
+                            "format": ("Please say digits one by one or type the number.", "احكي الأرقام رقم رقم أو اكتب الرقم.")}
+            if reason in descriptions:
+                phone_question = say(state, *descriptions[reason])
+            # نعرض التفريغ الرقمي المرفوض كما وصل، دون تخمين أرقام بديلة أو إرساله للسجل.
+            candidate = selected_state.get("phone_candidate") or ""
+            if re.fullmatch(r"[+\d\s()./-]+", candidate):
+                phone_question = say(state, f"I recognized {candidate}. ", f"الرقم اللي وصلني {candidate}. ") + phone_question
         question = (say(state, "What is the patient's full name?", "شو اسم المريض الكامل؟") if not valid_patient_name(selected_state.get("patient_name"))
-                    else say(state, "What is your phone number?", "شو رقم تلفونك؟"))
+                    else phone_question)
         return {**updates, "stage": "awaiting_patient_details", "pending_action": None,
                 "reply": question}
+
+    # تأكيد الرقم مستقل عن موافقة الحجز، ويشير دائمًا إلى الرقم الحالي بعد آخر تصحيح.
+    if selected_state.get("confirmed_phone") != selected_state["patient_phone"]:
+        number = selected_state["patient_phone"]
+        return {**updates, "stage": "awaiting_phone_confirmation", "pending_action": None,
+                "reply": say(state, f"I heard your phone number as {number}. Is this correct? Say yes to confirm the number, or type the corrected number.",
+                             f"سمعت رقم تلفونك {number}. الرقم صحيح؟ احكي نعم لتأكيد الرقم أو اكتب الرقم الصحيح.")}
 
     try:
         pending = prepare_booking_action(selected_state)
@@ -383,7 +422,7 @@ def slot_followup_node(state: AgentState) -> dict:
                     "reply": say(state, "How old is the patient?", "كم عمر المريض؟")}
         if selected_state.get("requires_guardian") or selected_state.get("service_id") == "pediatrics_visit":
             return {**updates, "stage": "awaiting_patient_details", "pending_action": None,
-                    "reply": say(state, "Guardian verification is required. Please contact the clinic to complete this request.", "لازم التحقق من ولي الأمر. تواصل مع العيادة لاستكمال الطلب.")}
+                    "reply": say(state, "What is the guardian's full name?", "شو اسم ولي الأمر الكامل؟")}
         return {**updates, "stage": "awaiting_patient_details", "pending_action": None,
                 "reply": say(state, "We need to verify the booking details first.", "لازم نتحقق من بيانات الحجز أولًا.")}
     existing = state.get("pending_action")
@@ -782,6 +821,10 @@ def clarify_node(state: AgentState) -> dict:
 
     is_arabic = state.get("language") == "ar"
     if state.get("date_conflict"):
+        if not state.get("requested_date"):
+            return {"stage": "awaiting_details", "reply": say(state,
+                f"The weekday conflicts with the calendar date in '{state['date_conflict']}'. Which full date do you intend?",
+                f"اسم اليوم مختلف عن التاريخ في «{state['date_conflict']}». أي تاريخ كامل تقصد؟")}
         return {"stage": "awaiting_details", "reply": say(state,
             f"You previously requested {state.get('requested_date')}, which conflicts with {state['date_conflict']}. Please confirm the full date you want.",
             f"طلبك السابق ليوم {state.get('requested_date')} مختلف عن {state['date_conflict']}. ممكن تأكد التاريخ الكامل المطلوب؟")}
@@ -904,6 +947,12 @@ def build_graph():
         AgentState,
         context_schema=GraphContext,
     )
+    # الإلغاء المطلوب في السياسة عقدة محدودة، وليس نقل مواعيد أو إدارة عامة للحجوزات.
+    async def cancellation_node(state, runtime: Runtime[GraphContext]):
+        from actions.cancellation import propose_cancellation
+        return await propose_cancellation(state, runtime.context["gateway"])
+    builder.add_node("cancellation", cancellation_node)
+    builder.add_edge("cancellation", END)
 
     # ==============================================
     # أولاً: تسجيل جميع العقد
@@ -957,6 +1006,7 @@ def build_graph():
             "normal": "patient_lookup",
             "slot_followup": "slot_followup",
             "date_conflict": "clarify",
+            "cancellation": "cancellation",
             "safety": "safety",
             "unsupported": "unsupported",
         },

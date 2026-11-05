@@ -15,7 +15,7 @@ import re
 from agent.state import AgentState
 from agent.slot_handoff import slot_matches_offer
 from agent.presentation import say, display_date, display_time, provider_label
-from agent.times import normalize_clock_words
+from agent.times import normalize_clock_words, period_reply
 
 
 # تستقبل قائمة المواعيد المصفاة وتعيد نصًا مرقمًا بنفس ترتيبها دون فرز أو نسخ مواعيد.
@@ -194,10 +194,16 @@ def filter_by_provider(
 
 # تكتشف إشارة اختيار من القائمة الحالية؛ تستثني تقديم الاسم والهاتف من مطابقة اسم الطبيب.
 def has_slot_reference(state: dict, message: str) -> bool:
-    return bool(extract_option_numbers(message) is not None or re.search(r"\d{1,2}:\d{2}", normalize_clock_words(message))
+    return bool(single_option_reference(state, message) or (state.get("proposed_slots") and re.search(r"\b(?:dr|doctor)\b|دكتور|دكتورة", message, re.I)) or (period_reply(message) and state.get("selection_candidates")) or extract_option_numbers(message) is not None or re.search(r"\d{1,2}:\d{2}", normalize_clock_words(message))
                 or "SL-" in message.upper()
                 or (filter_by_provider(state.get("proposed_slots", []), message, state)
                     and not re.search(r"اسمي|رقمي|my name|phone", message, re.IGNORECASE)))
+
+
+# الإشارة إلى هذا الموعد لا تُفهم كاختيار إلا إذا بقي خيار واحد فعلي في القائمة الحالية.
+def single_option_reference(state: dict, message: str) -> bool:
+    return len(state.get("proposed_slots", [])) == 1 and bool(re.fullmatch(
+        r"\s*(?:(?:(?:I want|I choose|I would like)\s+)?(?:this option|that appointment|this appointment|that option)|(?:بدي\s+)?(?:هاد الموعد|هذا الموعد|هالخيار|هذا الخيار))\s*[.!؟?]?\s*", message, re.I))
 
 
 # تعيد الساعات المحتملة لوقت غير موسوم بالصباح/المساء، ولا تختار إلا من المواعيد المعروضة.
@@ -255,8 +261,17 @@ def select_slot(
                  message, re.IGNORECASE):
         return rejected
     numbers = extract_option_numbers(message)
+    if single_option_reference(state, message):
+        numbers = None
     matches = slots
     has_selection = False
+    if single_option_reference(state, message):
+        has_selection = True
+    period = period_reply(message)
+    if period and state.get("selection_candidates"):
+        matches = [slot for slot in slots if slot["slot_id"] in state["selection_candidates"]
+                   and ((int(slot["start"][:2]) < 12) == (period == "AM"))]
+        has_selection = True
     if numbers is not None:
         if len(numbers) != 1 or not 1 <= numbers[0] <= len(slots):
             return rejected

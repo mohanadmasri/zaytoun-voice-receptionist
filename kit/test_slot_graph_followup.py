@@ -38,6 +38,12 @@ async def send(state, message, extracted):
     gateway = NoWritesGateway()
     with patch("agent.graph.extract_request", new=fake_extract):
         updated = await graph.ainvoke(state, context={"gateway": gateway})
+    if updated.get("stage") == "awaiting_phone_confirmation":
+        updated["current_message"] = "Yes, that phone number is correct"
+        async def confirm_extract(_message):
+            return IntakeResult(language="en", intent="other")
+        with patch("agent.graph.extract_request", new=confirm_extract):
+            updated = await graph.ainvoke(updated, context={"gateway": gateway})
     assert gateway.reads == [], gateway.reads
     assert gateway.writes == [], gateway.writes
     return updated
@@ -97,11 +103,11 @@ async def main():
 
     corrected = await send(deepcopy(state), "My name is Corrected Patient", IntakeResult(
         language="en", intent="booking", patient_name="Corrected Patient"))
-    # اسم مختلف قد يعني مريضًا آخر؛ نطلب إعادة التحقق بدل حمل الهاتف والموافقة القديمين.
-    assert corrected["selected_slot_id"] is None
-    assert corrected["patient_phone"] is None
-    assert corrected["pending_action"] is None
-    print("PASSED: changed patient name invalidates old identity and approval")
+    # تصحيح الاسم يحتفظ بالموعد والهاتف المؤكد، ويستبدل موافقة التفاصيل القديمة.
+    assert corrected["selected_slot_id"] == state["selected_slot_id"]
+    assert corrected["patient_phone"] == state["patient_phone"]
+    assert corrected["pending_action"]["action_id"] != action_id
+    print("PASSED: corrected name preserves slot and phone and replaces old approval")
 
     state = await send(state, "I have severe chest pain", IntakeResult(
         language="en", intent="booking", safety="none"))

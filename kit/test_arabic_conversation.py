@@ -23,6 +23,7 @@ from agent.slot_selection import select_slot, extract_option_numbers
 from core.session_store import session_store
 from test_voice_api import wav_bytes
 from test_voice_ui import app_ui
+from test_support import confirm_phone_turn
 
 DATA = Path(__file__).parent / "services/data"
 SERVICES = json.loads((DATA / "services.json").read_text(encoding="utf-8"))
@@ -126,6 +127,7 @@ class ArabicConversationTests(unittest.IsolatedAsyncioTestCase):
         with patch("agent.graph.extract_request", new=fake_extract):
             response = await self.client.post("/api/chat", json={"session_id": self.session_id, "message": message})
         self.assertEqual(response.status_code, 200, response.text)
+        response = await confirm_phone_turn(self.client, response, self.session_id)
         data = response.json()
         self.assertNotIn("SL-", data["reply"])
         self.assertNotIn("dr_khoury", data["reply"])
@@ -223,9 +225,10 @@ class ArabicConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["state"], "awaiting_approval")
         self.assertEqual(data["pending_action"]["payload"]["slot_id"], selected_id)
         data = await self.send("غير رقم التلفون إلى 0599000888", patient_phone="0599000888")
-        self.assertEqual(data["state"], "awaiting_patient_details")
-        self.assertIsNone(self.state()["patient_name"])
-        self.assertIsNone(data.get("pending_action"))
+        self.assertEqual(data["state"], "awaiting_approval")
+        self.assertEqual(self.state()["patient_name"], "مريضة اختبار")
+        self.assertEqual(self.state()["patient_phone"], "0599000888")
+        self.assertEqual(self.state()["selected_slot_id"], selected_id)
 
     async def test_ambiguous_time_then_doctor_reply_preserves_candidate_context(self):
         await self.search()
@@ -262,7 +265,7 @@ class ArabicConversationTests(unittest.IsolatedAsyncioTestCase):
                                 time_text="بعد الساعة 3 العصر", provider_any=True)
         with patch("integrations.voice_adapter.transcribe", return_value=TRANSCRIPT), \
              patch("integrations.voice_adapter.speak", return_value=None), patch("agent.graph.extract_request", new=fake_extract):
-            response = await self.client.post("/api/voice", data={"session_id": self.session_id},
+            response = await self.client.post("/api/voice", data={"preview_only": "true", "session_id": self.session_id},
                                               files={"audio": ("ar.wav", wav_bytes(), "audio/wav")})
             response = await self.client.post("/api/voice/confirm", json={"session_id": self.session_id, "transcript_token": response.json()["transcript_token"]})
         data = response.json()

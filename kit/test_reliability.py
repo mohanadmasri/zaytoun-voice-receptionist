@@ -86,7 +86,7 @@ class ReliabilityConversationTests(unittest.IsolatedAsyncioTestCase):
     # ترفع ملفًا إلى مرحلة المراجعة فقط؛ لا يمر النص إلى Graph قبل confirm.
     async def preview(self, text, audio=None, language="ar"):
         with patch("integrations.voice_adapter.transcribe", return_value=text):
-            return await self.client.post("/api/voice", data={"session_id": self.session_id, "language_hint": language},
+            return await self.client.post("/api/voice", data={"preview_only": "true", "session_id": self.session_id, "language_hint": language},
                                           files={"audio": ("speech.wav", audio or wav_bytes(), "audio/wav")})
 
     async def confirm(self, token):
@@ -143,7 +143,7 @@ class ReliabilityConversationTests(unittest.IsolatedAsyncioTestCase):
                 return "الخيار الثاني"
         app.dependency_overrides[get_voice_adapter] = lambda: SlowAdapter()
         async def upload(suffix):
-            return await self.client.post("/api/voice", data={"session_id": self.session_id, "language_hint": "ar"},
+            return await self.client.post("/api/voice", data={"preview_only": "true", "session_id": self.session_id, "language_hint": "ar"},
                                           files={"audio": ("speech.wav", wav_bytes() + suffix, "audio/wav")})
         old = asyncio.create_task(upload(b"OLD"))
         await asyncio.wait_for(entered.wait(), 2)
@@ -173,7 +173,7 @@ class ReliabilityConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(updated["patient_age_unverified"])
         updated = update_state_from_intake({**old, "current_message": "اسمي سلمى محمود"},
                                           IntakeResult(language="ar", patient_name="سلمى محمود"))
-        self.assertIsNone(updated["patient_phone"])
+        self.assertEqual(updated["patient_phone"], old["patient_phone"])
         self.assertIsNone(updated["pending_action"])
 
     async def test_invalid_identity_cannot_prepare_or_execute_old_approval(self):
@@ -229,7 +229,7 @@ class ReliabilityConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.state()["proposed_slots"], [])
         self.assertIsNone(self.state()["selected_slot_id"])
         await handle_approval(self.session_id, action_id, True, gateway)
-        gateway.call_write.assert_awaited_once()
+        self.assertEqual(sum(call.args[0] == "create_booking" for call in gateway.call_write.await_args_list), 1)
         await self.send("مرحبا")
         self.assertIsNone(self.state()["patient_phone"])
         await self.pending()
@@ -237,7 +237,7 @@ class ReliabilityConversationTests(unittest.IsolatedAsyncioTestCase):
         await handle_approval(self.session_id, state["pending_action"]["action_id"], False, gateway)
         self.assertEqual(self.state()["stage"], "booking_rejected")
         self.assertEqual(self.state()["proposed_slots"], [])
-        gateway.call_write.assert_awaited_once()
+        self.assertEqual(sum(call.args[0] == "create_booking" for call in gateway.call_write.await_args_list), 1)
 
     async def test_other_patient_phone_lookup_does_not_become_patient_name(self):
         from types import SimpleNamespace

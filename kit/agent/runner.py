@@ -16,6 +16,8 @@ from core.session_store import session_store
 from agent.state import create_initial_state
 import re
 from time import perf_counter
+from agent.presentation import say
+from agent.patient_identity import third_party_request
 
 
 
@@ -31,7 +33,7 @@ async def handle_message(
     # 1. استرجاع بيانات المحادثة السابقة
     state = session_store.get_or_create(session_id)
     # انتهاء طلب سابق لا يسمح بنقل هوية أو موعد إلى الطلب التالي؛ التحية أثناء طلب معلق لا تمسحه.
-    if state.get("stage") in ("booking_confirmed", "booking_rejected") or re.search(r"\b(?:start a new|new appointment|another appointment)\b|ابدأ من جديد|ابدا من جديد|موعد جديد", message, re.I):
+    if state.get("stage") in ("booking_confirmed", "booking_rejected", "booking_cancelled") or re.search(r"\b(?:start a new|new appointment|another appointment)\b|ابدأ من جديد|ابدا من جديد|موعد جديد", message, re.I):
         state = {**create_initial_state(session_id), "language": state.get("language", "unknown")}
 
     # 2. وضع رسالة المريض الجديدة داخل الحالة
@@ -45,6 +47,17 @@ async def handle_message(
         context={"gateway": gateway}
     )
 
+    # تبديل هوية موجودة بالصوت يحتاج توضيحًا صريحًا؛ التفريغ التلقائي ليس إثبات هوية.
+    if input_language and (state.get("patient_name") or state.get("patient_phone")) and (
+        third_party_request(message) or (state.get("patient_name") and updated_state.get("patient_name") != state.get("patient_name"))
+        or (state.get("confirmed_phone") == state.get("patient_phone") and state.get("patient_phone") and updated_state.get("patient_phone") != state.get("patient_phone"))
+    ):
+        response = {"session_id": session_id, "state": state.get("stage"), "language": input_language,
+                    "reply": say({"language": input_language}, "To change the patient, please type the actual patient's full name and phone to confirm. Your current request is unchanged.", "لتغيير المريض، اكتب اسم المريض الفعلي ورقم تلفونه للتأكيد. طلبك الحالي ما تغيّر."),
+                    "tool_calls": updated_state.get("tool_calls", [])}
+        if state.get("pending_action"):
+            response["pending_action"] = state["pending_action"]
+        return response
     # 4. حفظ الحالة المحدثة للمحادثة التالية
     session_store.save(updated_state)
 
