@@ -40,6 +40,33 @@ def selection_state():
 
 # تفحص تحليل الأرقام وتقاطع الرقم والمعرف والوقت وحدود القائمة دون أي أدوات.
 class NumberedSelectionTests(unittest.TestCase):
+    def test_arabic_quarter_hour_requires_a_unique_current_offer(self):
+        state = selection_state()
+        state.update(language="ar", time_kind="missing", time_after=None)
+        morning = {**make_slot("SL-AM", "01:15"), "provider_name_ar": "رانيا خوري"}
+        afternoon = {**morning, "slot_id": "SL-PM", "start": "13:15"}
+        state["proposed_slots"] = [morning, afternoon]
+        result = select_slot(state, "الساعة واحدة وربع مع رانيا خوري")
+        self.assertEqual(result["stage"], "awaiting_slot_selection")
+        self.assertIsNone(result["selected_slot_id"])
+        self.assertEqual(result["selection_candidates"], ["SL-AM", "SL-PM"])
+        self.assertEqual(select_slot(state, "واحدة وربع مساءً مع رانيا خوري")["selected_slot_id"], "SL-PM")
+        state["proposed_slots"] = [make_slot("SL-OTHER", "16:30")]
+        self.assertIsNone(select_slot(state, "واحدة وربع")["selected_slot_id"])
+
+    def test_doctor_and_hour_must_agree_on_one_offered_slot(self):
+        state = selection_state()
+        self.assertEqual(select_slot(state, "Dr. Rania Khoury at four p m")["selected_slot_id"], "SL-A")
+        for message in ("4 PM with Dr. Rania Smith", "4 PM with Dr. Sami Nasser",
+                        "4 PM or 3:45 PM with Dr. Rania Khoury"):
+            with self.subTest(message=message):
+                self.assertIsNone(select_slot(state, message)["selected_slot_id"])
+        state["proposed_slots"].append(make_slot("SL-D", "16:00"))
+        result = select_slot(state, "4 PM with Dr. Rania Khoury")
+        self.assertEqual(result["stage"], "awaiting_slot_selection")
+        self.assertIsNone(result["selected_slot_id"])
+        self.assertEqual(result["selection_candidates"], ["SL-A", "SL-D"])
+
     def test_supported_forms(self):
         for message in ("2", "option 2", "الخيار ٢", "I choose option 2", "أختار ٢"):
             with self.subTest(message=message):

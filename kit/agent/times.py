@@ -80,10 +80,13 @@ def normalize_clock_words(message: str) -> str:
     words.update(ARABIC_HOURS)
     text = message.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789"))
     hours = r"(?:\d{1,2}|" + "|".join(re.escape(word) for word in sorted(words, key=len, reverse=True)) + r")"
-    pattern = rf"(?<!\w)(?P<hour>{hours})\s*(?P<part>and a half|thirty|ونص|والنصف|و نص|ونصف)(?!\w)"
+    # Give offered-slot matching the same clock form for spoken quarter hours.
+    quarter = r"و\s*(?:ال)?ربع"
+    pattern = rf"(?<!\w)(?P<hour>{hours})\s*(?P<part>{quarter}|and a half|thirty|ونص|والنصف|و نص|ونصف)(?!\w)"
     def replace(match):
         value = match.group("hour").casefold()
-        return f"{int(value) if value.isdigit() else words[value]}:30"
+        minute = "15" if re.fullmatch(quarter, match.group("part")) else "30"
+        return f"{int(value) if value.isdigit() else words[value]}:{minute}"
     return re.sub(pattern, replace, text, flags=re.I)
 
 

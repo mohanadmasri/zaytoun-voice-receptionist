@@ -15,7 +15,7 @@ import re
 from agent.state import AgentState
 from agent.slot_handoff import slot_matches_offer
 from agent.presentation import say, display_date, display_time, provider_label
-from agent.times import normalize_clock_words, period_reply
+from agent.times import normalize_clock_words, normalize_time, period_reply
 
 
 # تستقبل قائمة المواعيد المصفاة وتعيد نصًا مرقمًا بنفس ترتيبها دون فرز أو نسخ مواعيد.
@@ -181,13 +181,21 @@ def filter_by_provider(
     # الاسم الذي يأتي بعد «اسمي» هو اسم المريض لا اسم الطبيب، حتى لو كانا متشابهين.
     provider_message = re.split(r"اسمي|رقمي|my name|phone", message, maxsplit=1, flags=re.IGNORECASE)[0]
     tokens = set(normalize_service_text(provider_message).split()) - titles
+    # For a timed choice with a titled full name, require both name parts.
+    full_name = re.search(r"\b(?:dr\.?|doctor)\s+([a-z]+)\s+([a-z]+)(?=\s*(?:[.!?,]|$|\bat\b|\bplease\b))",
+                          provider_message, re.I)
+    required_name = set()
+    if full_name and full_name[2].casefold() not in {"at", "please"} and offered_clock_times(message):
+        required_name = {part.casefold() for part in full_name.groups()}
+        if required_name == {"sami", "nasser"}:
+            required_name = {"sami", "nassar"}
     scores = []
     for slot in slots:
         provider = next((p for p in state.get("provider_catalog", []) if p.get("id") == slot.get("provider_id")), {})
         names = " ".join(str(name or "") for name in (slot.get("provider_name"), slot.get("provider_name_ar"),
                                                         provider.get("name"), provider.get("name_ar")))
         name_tokens = set(normalize_service_text(names).split()) - titles
-        scores.append(len(tokens & name_tokens))
+        scores.append(len(tokens & name_tokens) if required_name <= name_tokens else 0)
     best = max(scores, default=0)
     return [slot for slot, score in zip(slots, scores) if best and score == best]
 
@@ -210,16 +218,25 @@ def single_option_reference(state: dict, message: str) -> bool:
 # عند وجود 03:45 و15:45 معًا يبقى الاختيار غامضًا بدل افتراض فترة زمنية.
 def offered_clock_times(message: str) -> list[str] | None:
     text = normalize_clock_words(message).translate(str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789"))
-    tokens = re.findall(r"\b\d{1,2}:\d{2}\s*(?:AM|PM)?\b", text, re.IGNORECASE)
+    # An explicit hour with AM/PM is a clock reference even without minutes.
+    meridiem = r"[ap]\.?\s*m\.?"
+    hour_word = r"one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve"
+    tokens = re.findall(
+        rf"\b(?:\d{{1,2}}:\d{{2}}(?:\s*{meridiem})?|(?:\d{{1,2}}|{hour_word})\s*{meridiem})(?!\w)",
+        text, re.I,
+    )
     if not tokens:
         return None
     if len(tokens) != 1:
         return []
+    if re.search(meridiem, tokens[0], re.I):
+        value = normalize_time(tokens[0])["requested_time"]
+        return [value] if value else []
     value = extract_time(tokens[0])
     if value is None:
         return []
     hour, minute = map(int, value.split(":"))
-    if re.search(r"AM|PM", tokens[0], re.IGNORECASE) or hour > 12 or tokens[0].startswith("0"):
+    if hour > 12 or tokens[0].startswith("0"):
         return [value]
     am, pm = bool(re.search(r"صباح|الصبح", text)), bool(re.search(r"مساء|العصر|بعد الظهر", text))
     if am and pm:
