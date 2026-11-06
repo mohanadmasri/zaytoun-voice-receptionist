@@ -264,6 +264,53 @@ class VoiceApiTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(after[field], state[field])
                 self.assertIsNone(response.json().get("pending_action"))
 
+    async def test_arabic_spoken_hour_keeps_current_search_context(self):
+        from agent.slot_handoff import scheduling_signature
+        from agent.state import create_initial_state
+
+        slots = [{**SLOTS[0], "slot_id": f"SL-CONTEXT-{index}", "date": "2026-11-10",
+                  "start": start, "provider_id": provider, "provider_name_ar": name}
+                 for index, (start, provider, name) in enumerate((
+                     ("14:15", "dr_nassar", "سامي نصار"), ("14:00", "dr_nassar", "سامي نصار"),
+                     ("13:45", "dr_nassar", "سامي نصار"), ("16:30", "dr_khoury", "رانيا خوري"),
+                     ("13:15", "dr_khoury", "رانيا خوري"),
+                 ))]
+        for voice in (False, True):
+            for suffix in ("", " مع الدكتور سامي نصار"):
+                with self.subTest(voice=voice, suffix=suffix):
+                    state = create_initial_state(self.session_id)
+                    state.update(language="ar", stage="slots_proposed", service_id="dental_checkup",
+                                 service_text="فحص أسنان دوري", date_text="10 نوفمبر 2026",
+                                 requested_date="2026-11-10", time_text="3 العصر", time_kind="exact",
+                                 requested_time="15:00", provider_choice="any", proposed_slots=slots)
+                    state["offer_context"] = {"request": scheduling_signature(state),
+                                              "search": {"time_kind": "missing", "requested_time": None},
+                                              "slot_ids": [slot["slot_id"] for slot in slots]}
+                    session_store.save(state)
+                    self.gateway.reads.clear()
+                    message = "موعد الساعة اثنتين" + suffix
+
+                    async def extract(_message):
+                        return IntakeResult(language="ar", intent="booking", time_text="الساعة اثنتين",
+                                            provider_text="سامي نصار" if suffix else None)
+
+                    with patch("agent.graph.extract_request", new=extract):
+                        if voice:
+                            response = await self.send_voice(message)
+                            self.assertEqual(response.json()["transcript"], message)
+                        else:
+                            response = await self.client.post("/api/chat", json={
+                                "session_id": self.session_id, "message": message,
+                            })
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertEqual(response.json()["reply"], "شو اسم المريض الكامل؟")
+                    self.assertEqual(response.json()["state"], "awaiting_patient_details")
+                    after = session_store.get_or_create(self.session_id)
+                    self.assertEqual(after["selected_slot_id"], "SL-CONTEXT-1")
+                    for field in ("service_id", "requested_date", "proposed_slots", "offer_context"):
+                        self.assertEqual(after[field], state[field], field)
+                    self.assertEqual(self.gateway.reads, [])
+
     async def test_arabic_quarter_hour_selects_current_offer(self):
         from agent.state import create_initial_state
 

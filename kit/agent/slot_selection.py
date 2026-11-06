@@ -15,7 +15,7 @@ import re
 from agent.state import AgentState
 from agent.slot_handoff import slot_matches_offer
 from agent.presentation import say, display_date, display_time, provider_label
-from agent.times import normalize_clock_words, normalize_time, period_reply
+from agent.times import ARABIC_HOURS, normalize_clock_words, normalize_time, period_reply
 
 
 # تستقبل قائمة المواعيد المصفاة وتعيد نصًا مرقمًا بنفس ترتيبها دون فرز أو نسخ مواعيد.
@@ -202,6 +202,8 @@ def filter_by_provider(
 
 # تكتشف إشارة اختيار من القائمة الحالية؛ تستثني تقديم الاسم والهاتف من مطابقة اسم الطبيب.
 def has_slot_reference(state: dict, message: str) -> bool:
+    if state.get("proposed_slots") and "الساعة" in message and offered_clock_times(message) is not None:
+        return True
     return bool(single_option_reference(state, message) or (state.get("proposed_slots") and re.search(r"\b(?:dr|doctor)\b|دكتور|دكتورة", message, re.I)) or (period_reply(message) and state.get("selection_candidates")) or extract_option_numbers(message) is not None or re.search(r"\d{1,2}:\d{2}", normalize_clock_words(message))
                 or "SL-" in message.upper()
                 or (filter_by_provider(state.get("proposed_slots", []), message, state)
@@ -218,6 +220,11 @@ def single_option_reference(state: dict, message: str) -> bool:
 # عند وجود 03:45 و15:45 معًا يبقى الاختيار غامضًا بدل افتراض فترة زمنية.
 def offered_clock_times(message: str) -> list[str] | None:
     text = normalize_clock_words(message).translate(str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789"))
+    # Treat a spoken hour after the Arabic clock cue like a clock without AM/PM.
+    arabic_hours = {**ARABIC_HOURS, "اثنتين": 2, "إثنتين": 2}
+    hour_words = "|".join(re.escape(word) for word in sorted(arabic_hours, key=len, reverse=True))
+    text = re.sub(rf"\bالساعة\s+({hour_words})(?!\w)",
+                  lambda match: f"{arabic_hours[match[1]]}:00", text)
     # An explicit hour with AM/PM is a clock reference even without minutes.
     meridiem = r"[ap]\.?\s*m\.?"
     hour_word = r"one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve"

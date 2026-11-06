@@ -40,6 +40,19 @@ def selection_state():
 
 # تفحص تحليل الأرقام وتقاطع الرقم والمعرف والوقت وحدود القائمة دون أي أدوات.
 class NumberedSelectionTests(unittest.TestCase):
+    def test_arabic_spoken_hour_requires_a_unique_current_offer(self):
+        state = selection_state()
+        state.update(language="ar", time_kind="missing", time_after=None,
+                     proposed_slots=[make_slot("SL-AM", "02:00", "dr_nassar"),
+                                     make_slot("SL-PM", "14:00", "dr_nassar")])
+        result = select_slot(state, "موعد الساعة اثنتين")
+        self.assertEqual(result["stage"], "awaiting_slot_selection")
+        self.assertIsNone(result["selected_slot_id"])
+        self.assertEqual(result["selection_candidates"], ["SL-AM", "SL-PM"])
+        state.update(stage=result["stage"], selection_candidates=result["selection_candidates"])
+        self.assertEqual(select_slot(state, "مساءً")["selected_slot_id"], "SL-PM")
+        self.assertIsNone(select_slot(state, "موعد الساعة ثلاثة")["selected_slot_id"])
+
     def test_arabic_quarter_hour_requires_a_unique_current_offer(self):
         state = selection_state()
         state.update(language="ar", time_kind="missing", time_after=None)
