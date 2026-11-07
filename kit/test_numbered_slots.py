@@ -40,6 +40,34 @@ def selection_state():
 
 # تفحص تحليل الأرقام وتقاطع الرقم والمعرف والوقت وحدود القائمة دون أي أدوات.
 class NumberedSelectionTests(unittest.TestCase):
+    def test_english_spoken_minutes_and_ambiguity(self):
+        state = selection_state()
+        state.update(time_kind="missing", time_after=None, proposed_slots=[
+            make_slot("SL-QUARTER", "13:15"), make_slot("SL-FIFTY", "13:50"),
+        ])
+        self.assertEqual(select_slot(state, "one fifty")["selected_slot_id"], "SL-FIFTY")
+        state["proposed_slots"].pop()
+        for message in ("at 150 with Dr. Rania Khoury", "one fifteen AM", "one fifty", "two fifteen"):
+            with self.subTest(message=message):
+                self.assertIsNone(select_slot(state, message)["selected_slot_id"])
+        state["proposed_slots"].append(make_slot("SL-AM", "01:15"))
+        result = select_slot(state, "one fifteen")
+        self.assertIsNone(result["selected_slot_id"])
+        self.assertEqual(result["selection_candidates"], ["SL-QUARTER", "SL-AM"])
+
+    def test_english_search_time_uses_known_clinic_hours(self):
+        from agent.graph import normalize_time_node
+
+        state = {"time_text": "one fifteen", "requested_date": "2026-11-10",
+                 "clinic_calendar": {"opening_hours": {"tuesday": {"open": "09:00", "close": "17:00"}}}}
+        self.assertEqual(normalize_time_node(state)["requested_time"], "13:15")
+        state["time_text"] = "one fifteen AM"
+        self.assertEqual(normalize_time_node(state)["requested_time"], "01:15")
+        state.update(time_text="one fifteen", clinic_calendar={})
+        self.assertEqual(normalize_time_node(state)["time_kind"], "ambiguous")
+        state.update(time_text="1:15 PM", current_message="I want at 150")
+        self.assertEqual(normalize_time_node(state)["time_kind"], "unrecognized")
+
     def test_arabic_spoken_hour_requires_a_unique_current_offer(self):
         state = selection_state()
         state.update(language="ar", time_kind="missing", time_after=None,

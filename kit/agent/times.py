@@ -80,6 +80,21 @@ def normalize_clock_words(message: str) -> str:
     words.update(ARABIC_HOURS)
     text = message.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789"))
     hours = r"(?:\d{1,2}|" + "|".join(re.escape(word) for word in sorted(words, key=len, reverse=True)) + r")"
+    # Convert spoken English minutes before matching the shorter half-hour forms.
+    minutes = dict(zip("ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen".split(), range(10, 20)))
+    for tens_word, tens in (("twenty", 20), ("thirty", 30), ("forty", 40), ("fifty", 50)):
+        minutes[tens_word] = tens
+        for unit, value in zip("one two three four five six seven eight nine".split(), range(1, 10)):
+            minutes[f"{tens_word} {unit}"] = tens + value
+    minute_words = "|".join(re.escape(word).replace(r"\ ", r"[\s-]+")
+                            for word in sorted(minutes, key=len, reverse=True))
+
+    def spoken_minutes(match):
+        hour = match["hour"].casefold()
+        minute = re.sub(r"[\s-]+", " ", match["minute"].casefold())
+        return f"{int(hour) if hour.isdigit() else words[hour]}:{minutes[minute]:02d}"
+
+    text = re.sub(rf"(?<!\w)(?P<hour>{hours})\s+(?P<minute>{minute_words})(?!\w)", spoken_minutes, text, flags=re.I)
     # Give offered-slot matching the same clock form for spoken quarter hours.
     quarter = r"و\s*(?:ال)?ربع"
     pattern = rf"(?<!\w)(?P<hour>{hours})\s*(?P<part>{quarter}|and a half|thirty|ونص|والنصف|و نص|ونصف)(?!\w)"

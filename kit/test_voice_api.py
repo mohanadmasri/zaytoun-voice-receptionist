@@ -239,15 +239,29 @@ class VoiceApiTests(unittest.IsolatedAsyncioTestCase):
                      ("16:30", "dr_khoury", "Dr. Rania Khoury"),
                      ("13:15", "dr_khoury", "Dr. Rania Khoury"),
                  ))]
-        for voice in (False, True):
-            with self.subTest(voice=voice):
+        cases = (
+            ("I prefer at 2 PM with Dr. Sami Nasser.", "2 PM", "Dr. Sami Nasser", "SL-1"),
+            ("one fifteen", "one fifteen", None, "SL-4"),
+            ("one fifteen with Dr. Rania Khoury", "one fifteen", "Dr. Rania Khoury", "SL-4"),
+            ("one fifteen with doctor rania houri", "one fifteen", "rania houri", "SL-4"),
+            ("two fifteen", "two fifteen", None, "SL-0"),
+            ("at 1:15", "1:15", None, "SL-4"),
+            ("two PM", "two PM", None, "SL-1"),
+            ("I want at 150 with Dr. Rania Khoury", "1:15 PM", "Dr. Rania Khoury", None),
+            ("one fifty", "one fifty", None, None),
+            ("one fifteen AM", "one fifteen AM", None, None),
+        )
+        for voice, (message, time_text, provider_text, expected_slot) in (
+            (voice, case) for voice in (False, True) for case in cases
+        ):
+            with self.subTest(voice=voice, message=message):
                 state = create_initial_state(self.session_id)
                 state.update(language="en", stage="slots_proposed", service_id="dental_checkup",
                              service_text="dental checkup", requested_date="2026-11-10",
                              date_text="November 10, 2026", provider_choice="any", proposed_slots=slots)
                 session_store.save(state)
-                message = "I prefer at 2 PM with Dr. Sami Nasser."
-                fields = {"time_text": "2 PM", "provider_text": "Dr. Sami Nasser"}
+                self.gateway.reads.clear()
+                fields = {"time_text": time_text, "provider_text": provider_text}
                 if voice:
                     response = await self.send_voice(message, **fields)
                     self.assertEqual(response.json()["transcript"], message)
@@ -257,9 +271,11 @@ class VoiceApiTests(unittest.IsolatedAsyncioTestCase):
                         "session_id": self.session_id, "message": message,
                     })
                 self.assertEqual(response.status_code, 200, response.text)
-                self.assertEqual(response.json()["state"], "awaiting_patient_details", response.json()["reply"])
+                expected_stage = "awaiting_patient_details" if expected_slot else "awaiting_slot_selection"
+                self.assertEqual(response.json()["state"], expected_stage, response.json()["reply"])
                 after = session_store.get_or_create(self.session_id)
-                self.assertEqual(after["selected_slot_id"], "SL-1")
+                self.assertEqual(after["selected_slot_id"], expected_slot)
+                self.assertEqual(self.gateway.reads, [])
                 for field in ("service_id", "requested_date", "proposed_slots"):
                     self.assertEqual(after[field], state[field])
                 self.assertIsNone(response.json().get("pending_action"))

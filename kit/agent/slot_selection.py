@@ -189,6 +189,8 @@ def filter_by_provider(
         required_name = {part.casefold() for part in full_name.groups()}
         if required_name == {"sami", "nasser"}:
             required_name = {"sami", "nassar"}
+        if required_name == {"rania", "houri"}:
+            required_name = {"rania", "khoury"}
     scores = []
     for slot in slots:
         provider = next((p for p in state.get("provider_catalog", []) if p.get("id") == slot.get("provider_id")), {})
@@ -202,7 +204,7 @@ def filter_by_provider(
 
 # تكتشف إشارة اختيار من القائمة الحالية؛ تستثني تقديم الاسم والهاتف من مطابقة اسم الطبيب.
 def has_slot_reference(state: dict, message: str) -> bool:
-    if state.get("proposed_slots") and "الساعة" in message and offered_clock_times(message) is not None:
+    if state.get("proposed_slots") and offered_clock_times(message) is not None:
         return True
     return bool(single_option_reference(state, message) or (state.get("proposed_slots") and re.search(r"\b(?:dr|doctor)\b|دكتور|دكتورة", message, re.I)) or (period_reply(message) and state.get("selection_candidates")) or extract_option_numbers(message) is not None or re.search(r"\d{1,2}:\d{2}", normalize_clock_words(message))
                 or "SL-" in message.upper()
@@ -218,7 +220,14 @@ def single_option_reference(state: dict, message: str) -> bool:
 
 # تعيد الساعات المحتملة لوقت غير موسوم بالصباح/المساء، ولا تختار إلا من المواعيد المعروضة.
 # عند وجود 03:45 و15:45 معًا يبقى الاختيار غامضًا بدل افتراض فترة زمنية.
+def has_ambiguous_compact_time(message: str) -> bool:
+    return bool(re.search(r"\bat\s+\d{3}\b", message, re.I))
+
+
 def offered_clock_times(message: str) -> list[str] | None:
+    # A compact transcription such as "at 150" does not identify a clock time.
+    if has_ambiguous_compact_time(message):
+        return []
     text = normalize_clock_words(message).translate(str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789"))
     # Treat a spoken hour after the Arabic clock cue like a clock without AM/PM.
     arabic_hours = {**ARABIC_HOURS, "اثنتين": 2, "إثنتين": 2}
@@ -245,7 +254,8 @@ def offered_clock_times(message: str) -> list[str] | None:
     hour, minute = map(int, value.split(":"))
     if hour > 12 or tokens[0].startswith("0"):
         return [value]
-    am, pm = bool(re.search(r"صباح|الصبح", text)), bool(re.search(r"مساء|العصر|بعد الظهر", text))
+    am = bool(re.search(r"صباح|الصبح|\bmorning\b", text, re.I))
+    pm = bool(re.search(r"مساء|العصر|بعد الظهر|\b(?:afternoon|evening)\b", text, re.I))
     if am and pm:
         return []
     if pm:

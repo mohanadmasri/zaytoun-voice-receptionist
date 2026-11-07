@@ -12,6 +12,7 @@
 # يستخدم LLM للفهم وMCP للقراءة؛ متابعة الاختيار لا تستدعي أدوات العيادة.
 # ==================================================
 from agent.guardrails import check_guardrails
+from datetime import date
 from time import perf_counter
 from typing import Literal, TypedDict
 
@@ -30,7 +31,10 @@ from agent.service_mapping import match_service
 from agent.patient_memory import lookup_returning_patient
 from agent.service_mapping import match_provider
 from agent.scheduler_node import scheduler_node
-from agent.slot_selection import select_slot, extract_time, find_slots_by_id, extract_option_numbers
+from agent.slot_selection import (
+    select_slot, extract_time, find_slots_by_id, extract_option_numbers,
+    offered_clock_times, has_ambiguous_compact_time,
+)
 from agent.slot_handoff import slot_matches_offer
 from actions.approval import prepare_booking_action
 from agent.presentation import say
@@ -120,7 +124,20 @@ async def intake_node(state: AgentState) -> AgentState:
 # تُنفذ في مسار البحث فقط؛ تعيد missing عند غياب الوقت وتميز الغامض دون تخمين.
 # لا تستخدم LLM أو MCP أو API، ولا تغيّر مرحلة خطأ العيادة أو تنشئ حجزًا.
 def normalize_time_node(state: AgentState) -> dict:
-    preference = normalize_time(state.get("time_text"))
+    time_text = state.get("time_text") or ""
+    preference = normalize_time(time_text)
+    if has_ambiguous_compact_time(state.get("current_message", "")):
+        preference.update(kind="unrecognized", requested_time=None, after=None, before=None)
+    # For a new search, resolve an unspecified period only from known hours for that date.
+    if (preference["kind"] == "ambiguous" and state.get("requested_date")
+            and not re.search(r"[\u0600-\u06ff]|\b(?:after|before)\b", time_text, re.I)):
+        weekday = date.fromisoformat(state["requested_date"]).strftime("%A").lower()
+        hours = ((state.get("clinic_calendar") or {}).get("opening_hours") or {}).get(weekday)
+        candidates = offered_clock_times(time_text) or []
+        if hours and len(candidates) == 2:
+            within_hours = [clock for clock in candidates if hours["open"] <= clock < hours["close"]]
+            if len(within_hours) == 1:
+                preference.update(kind="exact", requested_time=within_hours[0])
     return {
         "time_kind": preference["kind"],
         "requested_time": preference["requested_time"],
