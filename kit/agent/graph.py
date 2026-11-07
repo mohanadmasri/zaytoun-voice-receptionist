@@ -25,7 +25,7 @@ from agent.intake import IntakeResult
 from agent.patient_identity import valid_patient_name, normalize_patient_phone, patient_name_noise, spoken_phone_digits
 import re
 from agent.dates import normalize_date
-from agent.times import normalize_time
+from agent.times import has_incomplete_arabic_relative_time, normalize_time
 from core.contracts import ClinicGateway
 from agent.service_mapping import match_service
 from agent.patient_memory import lookup_returning_patient
@@ -126,7 +126,8 @@ async def intake_node(state: AgentState) -> AgentState:
 def normalize_time_node(state: AgentState) -> dict:
     time_text = state.get("time_text") or ""
     preference = normalize_time(time_text)
-    if has_ambiguous_compact_time(state.get("current_message", "")):
+    message = state.get("current_message", "")
+    if has_ambiguous_compact_time(message) or has_incomplete_arabic_relative_time(message):
         preference.update(kind="unrecognized", requested_time=None, after=None, before=None)
     # For a new search, resolve an unspecified period only from known hours for that date.
     if (preference["kind"] == "ambiguous" and state.get("requested_date")
@@ -392,7 +393,7 @@ def slot_followup_node(state: AgentState) -> dict:
         updates = select_slot(state, message)
         if updates.get("stage") != "slot_selected":
             old_slot = next((s for s in state.get("proposed_slots", []) if s.get("slot_id") == state.get("selected_slot_id")), None)
-            if old_slot and slot_matches_offer(state, old_slot):
+            if old_slot and slot_matches_offer(state, old_slot) and not has_incomplete_arabic_relative_time(message):
                 updates["selected_slot_id"] = state["selected_slot_id"]
             return {**updates, "pending_action": None}
 

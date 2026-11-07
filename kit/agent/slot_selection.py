@@ -15,7 +15,9 @@ import re
 from agent.state import AgentState
 from agent.slot_handoff import slot_matches_offer
 from agent.presentation import say, display_date, display_time, provider_label
-from agent.times import ARABIC_HOURS, normalize_clock_words, normalize_time, period_reply
+from agent.times import (
+    ARABIC_HOURS, has_incomplete_arabic_relative_time, normalize_clock_words, normalize_time, period_reply,
+)
 
 
 # تستقبل قائمة المواعيد المصفاة وتعيد نصًا مرقمًا بنفس ترتيبها دون فرز أو نسخ مواعيد.
@@ -226,7 +228,7 @@ def has_ambiguous_compact_time(message: str) -> bool:
 
 def offered_clock_times(message: str) -> list[str] | None:
     # A compact transcription such as "at 150" does not identify a clock time.
-    if has_ambiguous_compact_time(message):
+    if has_ambiguous_compact_time(message) or has_incomplete_arabic_relative_time(message):
         return []
     text = normalize_clock_words(message).translate(str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789"))
     # Treat a spoken hour after the Arabic clock cue like a clock without AM/PM.
@@ -291,6 +293,9 @@ def select_slot(
         "pending_action": None, "selection_candidates": [],
         "reply": say(state, "Please choose one of the displayed option numbers.", "اختار رقم موعد واحد من القائمة المعروضة، لو سمحت."),
     }
+    if has_incomplete_arabic_relative_time(message):
+        return {**rejected, "reply": say(state, "Please say the complete appointment time.",
+                                         "ممكن تحكيلي الساعة كاملة؟")}
     if re.search(r"\b(?:old|previous|earlier)\s+(?:list|options?)\b|القائمة\s+القديمة|الخيارات\s+السابقة",
                  message, re.IGNORECASE):
         return rejected

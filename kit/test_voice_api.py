@@ -327,6 +327,54 @@ class VoiceApiTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(after[field], state[field], field)
                     self.assertEqual(self.gateway.reads, [])
 
+    async def test_arabic_quarter_to_selects_exact_offer_or_clarifies(self):
+        from agent.state import create_initial_state
+        from test_numbered_slots import make_slot
+
+        slots = [{**make_slot(f"SL-REL-{index}", start, doctor, "2026-11-10"), "provider_name_ar": name}
+                 for index, (start, doctor, name) in enumerate((
+                     ("09:45", "dr_nassar", "سامي نصار"), ("10:00", "dr_nassar", "سامي نصار"),
+                     ("10:45", "dr_khoury", "رانيا خوري"), ("11:00", "dr_khoury", "رانيا خوري"),
+                     ("11:15", "dr_khoury", "رانيا خوري"),
+                 ))]
+        cases = (("عشرة إلى ربع مع الدكتور سامي نصار", "عشرة إلى ربع", "SL-REL-0"),
+                 ("بختار الساعة ١٠ إلى ربع", "١٠ إلى ربع", "SL-REL-0"),
+                 ("الساعة عشرة إلا", "10:00 AM", None))
+        for voice in (False, True):
+            for message, extracted_time, expected in cases:
+                with self.subTest(voice=voice, message=message):
+                    state = create_initial_state(self.session_id)
+                    state.update(language="ar", stage="slots_proposed", service_id="dental_checkup",
+                                 service_text="dental checkup", requested_date="2026-11-10",
+                                 date_text="November 10, 2026", provider_choice="any", proposed_slots=slots)
+                    session_store.save(state)
+                    self.gateway.reads.clear()
+
+                    async def extract(_message):
+                        return IntakeResult(language="ar", intent="booking", time_text=extracted_time)
+
+                    with patch("agent.graph.extract_request", new=extract):
+                        if voice:
+                            response = await self.send_voice(message)
+                            self.assertEqual(response.json()["transcript"], message)
+                        else:
+                            response = await self.client.post("/api/chat", json={
+                                "session_id": self.session_id, "message": message,
+                            })
+                    self.assertEqual(response.status_code, 200, response.text)
+                    stage = "awaiting_patient_details" if expected else "awaiting_slot_selection"
+                    self.assertEqual(response.json()["state"], stage)
+                    if expected:
+                        self.assertEqual(response.json()["reply"], "شو اسم المريض الكامل؟")
+                    else:
+                        self.assertEqual(response.json()["reply"], "ممكن تحكيلي الساعة كاملة؟")
+                    after = session_store.get_or_create(self.session_id)
+                    self.assertEqual(after["selected_slot_id"], expected)
+                    for field in ("service_id", "requested_date", "proposed_slots"):
+                        self.assertEqual(after[field], state[field], field)
+                    self.assertEqual(self.gateway.reads, [])
+                    self.assertIsNone(response.json().get("pending_action"))
+
     async def test_arabic_quarter_hour_selects_current_offer(self):
         from agent.state import create_initial_state
 

@@ -40,6 +40,45 @@ def selection_state():
 
 # تفحص تحليل الأرقام وتقاطع الرقم والمعرف والوقت وحدود القائمة دون أي أدوات.
 class NumberedSelectionTests(unittest.TestCase):
+    def test_arabic_quarter_to_does_not_fall_back_to_the_hour(self):
+        state = selection_state()
+        state.update(language="ar", time_kind="missing", time_after=None, proposed_slots=[
+            {**make_slot("SL-QUARTER-TO", "09:45", "dr_nassar"), "provider_name_ar": "سامي نصار"},
+            {**make_slot("SL-HOUR", "10:00", "dr_nassar"), "provider_name_ar": "سامي نصار"},
+        ])
+        for message, expected in (
+            ("عشرة إلى ربع مع الدكتور سامي نصار", "SL-QUARTER-TO"),
+            ("بختار الساعة ١٠ إلى ربع", "SL-QUARTER-TO"),
+            ("عشرة إلا ربع", "SL-QUARTER-TO"),
+            ("العشرة إلا ربع", "SL-QUARTER-TO"),
+            ("الساعة عشرة إلا ربع صباحًا", "SL-QUARTER-TO"),
+            ("الساعة عشرة إلا ربع مساءً", None),
+            ("الساعة عشرة إلا", None),
+            ("ثلاثة إلا ربع", None),
+        ):
+            with self.subTest(message=message):
+                result = select_slot(state, message)
+                self.assertEqual(result["selected_slot_id"], expected)
+                if expected is None:
+                    self.assertEqual(result["stage"], "awaiting_slot_selection")
+
+        state["proposed_slots"].append(make_slot("SL-PM", "21:45", "dr_nassar"))
+        result = select_slot(state, "عشرة إلا ربع")
+        self.assertIsNone(result["selected_slot_id"])
+        self.assertEqual(result["selection_candidates"], ["SL-QUARTER-TO", "SL-PM"])
+
+    def test_arabic_relative_times_in_new_searches(self):
+        from agent.graph import normalize_time_node
+        from agent.times import normalize_time
+
+        for phrase, expected in (("ثلاثة إلا ربع مساءً", "14:45"), ("عشرة ونص صباحًا", "10:30"),
+                                 ("عشرة وربع صباحًا", "10:15"), ("واحدة إلا ربع صباحًا", "00:45")):
+            with self.subTest(phrase=phrase):
+                self.assertEqual(normalize_time(phrase)["requested_time"], expected)
+        result = normalize_time_node({"time_text": "10:00 AM", "current_message": "الساعة عشرة إلا"})
+        self.assertEqual(result["time_kind"], "unrecognized")
+        self.assertIsNone(result["requested_time"])
+
     def test_english_spoken_minutes_and_ambiguity(self):
         state = selection_state()
         state.update(time_kind="missing", time_after=None, proposed_slots=[

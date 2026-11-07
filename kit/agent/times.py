@@ -57,6 +57,25 @@ ARABIC_HOURS = {
     "الثانية عشرة": 12,
 }
 
+_ARABIC_HOUR_WORDS = "|".join(re.escape(word) for word in sorted(ARABIC_HOURS, key=len, reverse=True))
+_ARABIC_RELATIVE_TIME = re.compile(
+    rf"(?<!\w)(?P<hour>\d{{1,2}}|(?:ال)?(?:{_ARABIC_HOUR_WORDS}))\s+"
+    r"(?:[إا]لّ?ا|[إا]لى)(?!\w)(?P<quarter>\s+(?:ال)?ربع(?!\w))?"
+)
+
+
+def _arabic_relative_hour(match: re.Match) -> int:
+    hour = match["hour"]
+    if hour.isdecimal():
+        return int(hour)
+    return ARABIC_HOURS.get(hour, ARABIC_HOURS.get(hour.removeprefix("ال"), 0))
+
+
+def has_incomplete_arabic_relative_time(message: str) -> bool:
+    # An unfinished or unsupported relative time cannot become a whole hour.
+    return any(not match["quarter"] or not 1 <= _arabic_relative_hour(match) <= 12
+               for match in _ARABIC_RELATIVE_TIME.finditer(message))
+
 
 # تحويل عدد دقائق إلى وقت بصيغة HH:MM.
 def _format_minutes(total: int) -> str:
@@ -79,6 +98,14 @@ def normalize_clock_words(message: str) -> str:
     words = {name: i for i, name in enumerate("zero one two three four five six seven eight nine ten eleven twelve".split())}
     words.update(ARABIC_HOURS)
     text = message.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789"))
+    # Keep the hour unpadded so the offered list can still resolve AM/PM.
+    def quarter_to(match):
+        hour = _arabic_relative_hour(match)
+        if match["quarter"] and 1 <= hour <= 12:
+            return f"{(hour - 2) % 12 + 1}:45"
+        return match[0]
+
+    text = _ARABIC_RELATIVE_TIME.sub(quarter_to, text)
     hours = r"(?:\d{1,2}|" + "|".join(re.escape(word) for word in sorted(words, key=len, reverse=True)) + r")"
     # Convert spoken English minutes before matching the shorter half-hour forms.
     minutes = dict(zip("ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen".split(), range(10, 20)))
@@ -113,6 +140,8 @@ def normalize_time(
     # عدم وجود وقت يعني عدم وجود تفضيل زمني.
     if not time_text or not time_text.strip():
         return _result("missing")
+    if has_incomplete_arabic_relative_time(time_text):
+        return _result("unrecognized")
 
     text = normalize_clock_words(time_text.lower().strip())
     # أرقام الساعة المنطوقة تبقى خاضعة لفحص AM/PM؛ three o'clock وحدها ليست 3 PM.
