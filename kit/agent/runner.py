@@ -11,8 +11,7 @@
 # ==================================================
 
 from agent.graph import graph
-from agent.appointment_history import confirmed_change_reply, confirmed_change_request, history_query, history_reply
-from agent.guardrails import check_guardrails
+from agent.appointment_history import history_query, history_reply
 from core.contracts import ChatResponse, ClinicGateway
 from core.session_store import session_store
 from agent.state import create_initial_state
@@ -36,30 +35,22 @@ async def handle_message(
 
     # 1. استرجاع بيانات المحادثة السابقة
     state = session_store.get_or_create(session_id)
-    query = history_query(message)
-    change = confirmed_change_request(message) or is_appointment_time_change(message)
-    confirmed_context = (state.get("stage") == "booking_confirmed"
-                         or not (state.get("selected_slot_id") or state.get("proposed_slots"))
-                         or re.search(r"\b(?:BK-[A-Z0-9-]+|confirmed|booked)\b|المحجوز[ةه]", message, re.I))
-    if query or (change and confirmed_context and check_guardrails(message)["kind"] == "allow"):
+    if query := history_query(message):
         language = input_language or ("ar" if re.search(r"[\u0600-\u06ff]", message) else "en")
-        records = state.get("session_appointments", [])
-        if query:
-            reply = history_reply(records, query, language)
-        elif not records and state.get("stage") == "booking_confirmed":
-            reply = say({"language": language}, "Please contact the clinic to change the confirmed appointment.",
-                        "تواصل مع العيادة لتغيير الموعد المؤكد، لو سمحت.")
-        else:
-            reply = confirmed_change_reply(records, message, language)
         response: ChatResponse = {
             "session_id": session_id, "state": state.get("stage"), "language": language, "tool_calls": [],
-            "reply": reply,
+            "reply": history_reply(state.get("session_appointments", []), query, language),
+            "appointment_history": bool(state.get("session_appointments")),
         }
-        if query:
-            response["appointment_history"] = bool(records)
         if state.get("pending_action"):
             response["pending_action"] = state["pending_action"]
         return response
+    if state.get("stage") == "booking_confirmed" and is_appointment_time_change(message):
+        return {"session_id": session_id, "state": "booking_confirmed",
+                "language": input_language or state.get("language", "en"), "tool_calls": [],
+                "reply": say({"language": input_language or state.get("language")},
+                             "Please contact the clinic to change the confirmed appointment.",
+                             "تواصل مع العيادة لتغيير الموعد المؤكد، لو سمحت.")}
     # انتهاء طلب سابق لا يسمح بنقل هوية أو موعد إلى الطلب التالي؛ التحية أثناء طلب معلق لا تمسحه.
     if state.get("stage") in ("booking_confirmed", "booking_rejected", "booking_cancelled") or re.search(r"\b(?:start a new|new appointment|another appointment)\b|ابدأ من جديد|ابدا من جديد|موعد جديد", message, re.I):
         state = {**create_initial_state(session_id), "language": state.get("language", "unknown"),

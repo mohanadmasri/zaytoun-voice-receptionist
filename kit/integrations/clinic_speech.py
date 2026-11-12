@@ -2,7 +2,6 @@
 
 import asyncio
 from collections import OrderedDict
-from contextvars import ContextVar
 import json
 import logging
 import os
@@ -116,7 +115,6 @@ EN_TENS = "zero ten twenty thirty forty fifty".split()
 router = APIRouter()
 tickets = OrderedDict()
 active_tickets = set()
-synthetic_exact_speech = ContextVar("synthetic_exact_speech", default=False)
 PRIVATE_COMPANIONS = {
     "awaiting_phone_confirmation": {
         "ar": "وصلني رقم التلفون. تأكد إنه صحيح على الشاشة، واحكي نعم إذا بدك نكمل.",
@@ -294,15 +292,6 @@ def attach_speech(response, state):
         else:
             text = say(response, "Please check my message on the screen for the next step.",
                        "راجع رسالتي على الشاشة لتعرف الخطوة الجاية، لو سمحت.")
-    written = response.get("reply")
-    success_claim = isinstance(written, str) and written.startswith((
-        "Your appointment is confirmed.", "تم تأكيد موعدك.", "Appointment cancelled.", "تم إلغاء الموعد.",
-    ))
-    result = response.get("result") or {}
-    if synthetic_exact_speech.get() and isinstance(written, str) and written.strip() and (
-        not success_claim or (result.get("ok") is True and result.get("booking_id"))
-    ):
-        text = written
     now = monotonic()
     while tickets and (next(iter(tickets.values()))[0] <= now or len(tickets) >= 256):
         tickets.popitem(last=False)

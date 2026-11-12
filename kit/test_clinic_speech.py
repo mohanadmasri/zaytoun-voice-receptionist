@@ -32,7 +32,6 @@ class ClinicSpeechTests(unittest.IsolatedAsyncioTestCase):
             return httpx.Response(self.status, content=b"\x01\x00" * 100,
                                   headers={"content-type": "audio/pcm"})
         create_client = httpx.AsyncClient
-        self.create_client = create_client
         client_factory = patch.object(speech.httpx, "AsyncClient", side_effect=lambda **kwargs:
                                       create_client(transport=httpx.MockTransport(fake_provider), **kwargs))
         client_factory.start()
@@ -103,31 +102,6 @@ class ClinicSpeechTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("الشاشة" if language == "ar" else "screen", payload["input"])
                     self.assertEqual(payload["input"], speech.PRIVATE_COMPANIONS[stage][language])
         self.assertEqual(len(self.requests), 8)
-
-    async def test_exact_synthetic_speech_requires_loopback_and_opt_in(self):
-        for language, reply in (("en", "Review Synthetic Patient, 0599000111, BK-SAMPLE."),
-                                ("ar", "راجع موعد سامر مثال ورقم 0599000111.")):
-            fake = AsyncMock(return_value={"reply": reply, "state": "awaiting_approval", "language": language})
-            for enabled, remote in ((False, False), (True, False), (True, True)):
-                transport = httpx.ASGITransport(app=app, client=("192.0.2.10" if remote else "127.0.0.1", 12345))
-                async with self.create_client(transport=transport, base_url="http://127.0.0.1:18001") as client:
-                    with patch.dict("os.environ", {"ZAYTOUN_DEMO_EXACT_SPEECH": "synthetic-only" if enabled else ""}), \
-                         patch("app.main.handle_message", fake), \
-                         patch("integrations.voice_adapter.transcribe", return_value="نعم" if language == "ar" else "yes"):
-                        for response in (
-                            await client.post("/api/chat", json={"session_id": uuid4().hex, "message": "fixture"}),
-                            await client.post("/api/voice", data={"session_id": uuid4().hex, "language_hint": language},
-                                              files={"audio": ("fixture.wav", wav_bytes(), "audio/wav")}),
-                        ):
-                            data = response.json()
-                            self.assertEqual(data["reply"], reply)
-                            audio = await self.client.post(f"/api/speech/{data['speech_token']}")
-                            self.assertEqual(audio.status_code, 200)
-                            payload = self.requests[-1]["input"]
-                            if enabled and not remote:
-                                self.assertEqual(payload, reply)
-                            else:
-                                self.assertNotIn("0599000111", payload)
 
     async def test_unclassified_and_private_replies_use_safe_companions(self):
         for stage, reply in (

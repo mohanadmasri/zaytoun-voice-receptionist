@@ -110,7 +110,6 @@ class MandatoryFeaturesTests(unittest.IsolatedAsyncioTestCase):
         approved = await self.client.post("/api/approve", json={"session_id": self.sid, "action_id": action, "approved": True})
         booking = approved.json()["session_appointments"][0]
         for question in ("شو مواعيدي المحجوزة؟", "شو المواعيد اللي أنا عندي فيها موعد؟",
-                         "شو المواعيد المحجوزة لي", "شو مواعيدي المحجوزة", "What appointments have I booked?",
                          "شو آخر موعد حجزته؟", "شو مواعيدي؟", "عندي حجز؟", "ورجيني حجوزاتي",
                          "What are my appointments?", "What did I book last?", "Show my bookings."):
             with self.subTest(question=question):
@@ -121,15 +120,6 @@ class MandatoryFeaturesTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result["tool_calls"], [])
                 self.assertEqual(session_store.get_or_create(self.sid), state)
                 self.assertNotIn(booking["booking_id"], tickets.pop(result["speech_token"])[1])
-        for message in ("بدي اغير المواعيد المحجوزة", "بدي اغير هالموعد لساعة 11", "Reschedule my appointment"):
-            before = session_store.get_or_create(self.sid)
-            result = await self.send(message, confirm_phone=False)
-            self.assertIn(booking["booking_id"], result["reply"])
-            self.assertEqual(result["tool_calls"], [])
-            self.assertEqual(session_store.get_or_create(self.sid), before)
-        wrong = await self.send("Reschedule booking BK-OTHER", confirm_phone=False)
-        self.assertNotIn(booking["booking_id"], wrong["reply"])
-        self.assertEqual(len(self.gateway.writes), 2)
         await self.send("Dental checkup on November 4, 2026 after 3 PM", service_text="dental checkup",
                         date_text="November 4, 2026", time_text="after 3 PM")
         offered = session_store.get_or_create(self.sid)

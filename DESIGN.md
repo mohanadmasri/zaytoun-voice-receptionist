@@ -40,8 +40,6 @@ provided to the app at runtime. The native Windows launcher runs the same two se
 The browser requests speech through a short-lived server ticket. Known public replies
 can be spoken directly. Sensitive or unclassified text gets a fixed bilingual companion.
 Only a successful clinic result can trigger a spoken booking or cancellation confirmation.
-An explicit synthetic-only option permits verbatim speech on direct loopback requests.
-Normal sessions retain the privacy-safe speech policy.
 
 
 <!--
@@ -193,8 +191,6 @@ The state retains service, date and time, offers, selected slot and provider, pa
 phone confirmation, and pending approval. Successful approval adds a clinic-returned booking
 to the session appointment list. A successful cancellation updates an existing entry in that list.
 History questions read the list without changing the active booking workflow.
-Confirmed appointment changes are referred to the clinic after identifying the authorized
-session booking. The existing API supports creation and cancellation as separate actions.
 
 ### Returning Patients
 

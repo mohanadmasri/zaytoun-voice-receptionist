@@ -30,7 +30,7 @@ from integrations.mcp_gateway import ClinicGateway
 from integrations.voice_adapter import VoiceAdapter, VoiceError, MAX_AUDIO_BYTES, EMPTY_AUDIO
 from core.session_store import session_store
 from agent.presentation import say
-from integrations.clinic_speech import attach_speech, router as speech_router, synthetic_exact_speech
+from integrations.clinic_speech import attach_speech, router as speech_router
 from agent.patient_identity import valid_patient_name
 
 
@@ -112,29 +112,11 @@ app.state.last_audio = {}
 CONVERSATION_PATHS = {"/api/chat", "/api/approve", "/api/voice", "/api/voice/confirm"}
 
 
-@app.middleware("http")
-async def scope_synthetic_speech(request: Request, call_next):
-    enabled = (
-        os.getenv("ZAYTOUN_DEMO_EXACT_SPEECH") == "synthetic-only"
-        and request.url.path in CONVERSATION_PATHS
-        and request.client is not None and request.client.host in ("127.0.0.1", "::1")
-        and request.url.hostname in ("localhost", "127.0.0.1", "::1")
-        and not any(header in request.headers for header in ("forwarded", "x-forwarded-for", "x-forwarded-host"))
-    )
-    token = synthetic_exact_speech.set(enabled)
-    try:
-        return await call_next(request)
-    finally:
-        synthetic_exact_speech.reset(token)
-
-
 def speak_api_error(request: Request, response):
     if request.url.path not in CONVERSATION_PATHS or not isinstance(response, JSONResponse):
         return response
     data = json.loads(response.body)
     data.update(language=request.headers.get("x-clinic-language"), speech_error="request")
-    data["reply"] = say(data, "I couldn't process that request. Please try again.",
-                        "ما قدرت أعالج الطلب. جرّب مرة تانية، لو سمحت.")
     return JSONResponse(attach_speech(data, {}), status_code=response.status_code,
                         headers={key: value for key, value in response.headers.items() if key != "content-length"})
 
