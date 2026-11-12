@@ -5,7 +5,6 @@ A bilingual Arabic and English receptionist for a fictional clinic. It helps pat
 - Type a request or record it with the browser microphone. Continue the same booking across service, date, time, doctor, name, and phone questions.
 - Review the recognized phone and explicitly confirm it. Use the separate **Confirm booking** button to authorize the booking.
 - Use **My Appointments** or ask “شو مواعيدي؟” or “What did I book last?” for bookings confirmed in this conversation. Selecting a day filters the calendar list. **Show all** clears that filter.
-- Change a selected slot before approval by clearly requesting the new time. For a confirmed booking, the receptionist identifies the session booking or asks for its reference and directs you to the clinic. The clinic API offers separate booking and cancellation operations without a rescheduling operation.
 - Listen to typed or microphone replies, including approval outcomes and server-side errors, replay them, or mute them. Private phone, review, and appointment-history details stay on screen. Gemini receives fixed bilingual prompts for sensitive replies. An unavailable server or speech provider can prevent audio. The browser keeps the written reply and offers replay when a speech ticket is available.
 
 ## Architecture
@@ -58,12 +57,6 @@ Copy-Item .\kit\.env.example .\kit\.env
 ```
 
 Set `OPENROUTER_API_KEY` in `kit/.env`. The example also documents the intake and STT model variables, the clinic API key and URL, and the optional frozen clinic clock. Keep credentials local.
-
-For a separate loopback-only demonstration using **synthetic data only**, set
-`ZAYTOUN_DEMO_EXACT_SPEECH=synthetic-only` in that process's environment before launch.
-Gemini then receives the displayed reply verbatim, including synthetic details. The setting
-is disabled by default. Keep it unset for normal conversations and do not expose the
-opted-in process through a proxy.
 
 ```powershell
 .\kit\.venv\Scripts\python.exe .\kit\start_demo.py --check

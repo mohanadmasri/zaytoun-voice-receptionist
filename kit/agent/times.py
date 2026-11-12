@@ -85,16 +85,10 @@ _ARABIC_RELATIVE_TIME = re.compile(
 
 
 def is_appointment_time_change(message: str) -> bool:
-    if re.fullmatch(
-        r"\s*(?:(?:please\s+)?reschedule\s+(?:(?:my|the|this)\s+)?appointment"
-        r"|بدي\s+[أا]?غيّ?ر\s+(?:هالموعد|الموعد|موعدي))[.!؟?\s]*",
-        message, re.I,
-    ):
-        return True
     return bool(re.search(
-        r"\b(?:change|move|reschedule)\s+(?:(?:my|the|this|that)\s+)?(?:time\b|appointment\s+(?:time\b|"
+        r"\b(?:change|move)\s+(?:(?:my|the)\s+)?(?:time\b|appointment\s+(?:time\b|"
         r"to\s+(?=\d{3}\b|\d{1,2}(?::|\s*[ap]\.?\s*m\b|\s*[.!?]?\s*$))))"
-        r"|(?:[أا]?غيّ?ر|نغيّ?ر)\s+(?:الوقت|الساعة|(?:ال|هال)?موعد(?:ي)?\s+(?:ل(?:ل)?ساعة|إلى الساعة|الى الساعة))",
+        r"|(?:[أا]?غيّ?ر|نغيّ?ر)\s+(?:الوقت|الساعة|(?:ال)?موعد(?:ي)?\s+(?:ل(?:ل)?ساعة|إلى الساعة|الى الساعة))",
         message, re.I,
     ))
 
