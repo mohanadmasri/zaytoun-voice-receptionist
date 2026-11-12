@@ -5,9 +5,51 @@
 # لا يتصل بالعيادة ولا ينشئ أي حجز.
 
 import re
-from datetime import date
+from datetime import date, datetime, time
 
 from agent.state import AgentState
+
+
+def clinic_local_now(calendar: dict) -> datetime | None:
+    try:
+        return datetime.fromisoformat(calendar.get("now"))
+    except (TypeError, ValueError):
+        return None
+
+
+def appointment_has_passed(state: AgentState, day: str, clock: str | None = None) -> bool:
+    now = clinic_local_now(state.get("clinic_calendar") or {})
+    today = now.date().isoformat() if now else state.get("clinic_today")
+    if today and day < today:
+        return True
+    if not now or day != today or clock is None:
+        return False
+    try:
+        return time.fromisoformat(clock) < now.time()
+    except (TypeError, ValueError):
+        return False
+
+
+# بصمة القيود المتحققة تربط قائمة البدائل بالطلب الذي أنتجها، ولا تشمل لغة العرض أو بيانات المريض.
+def scheduling_signature(state: AgentState) -> dict:
+    return {key: state.get(key) for key in ("service_id", "requested_date", "provider_id", "provider_choice",
+                                           "time_kind", "requested_time", "time_after", "time_before")}
+
+
+# تتحقق من اختيار داخل القائمة الحالية. القيود الأصلية تظل صارمة إلا لبديل عرضه Scheduler
+# ببحث MCP موثق، وبنفس بصمة الطلب. هذه لا تختار موعدًا ولا تنفذ كتابة.
+def slot_matches_offer(state: AgentState, slot: dict) -> bool:
+    offered = next((item for item in state.get("proposed_slots", []) if item.get("slot_id") == slot.get("slot_id")), None)
+    if offered is None or any(offered.get(key) != slot.get(key) for key in ("date", "start", "provider_id", "service_id")):
+        return False
+    context = state.get("offer_context") or {}
+    if context and context.get("request") != scheduling_signature(state):
+        return False
+    if slot_matches_request(state, slot):
+        return True
+    if context.get("request") != scheduling_signature(state) or slot.get("slot_id") not in context.get("slot_ids", []):
+        return False
+    return slot_matches_request({**state, **context.get("search", {})}, slot)
 
 
 # تحويل الوقت إلى عدد دقائق منذ منتصف الليل.
@@ -154,6 +196,8 @@ def slot_matches_request(
     try:
         start_minutes = _minutes(slot.get("start"))
     except (ValueError, TypeError):
+        return False
+    if appointment_has_passed(state, slot["date"], slot["start"]):
         return False
 
     kind = state.get("time_kind", "missing")

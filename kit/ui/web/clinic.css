@@ -1,0 +1,108 @@
+:root {
+  color-scheme: light;
+  font-family: system-ui, "Segoe UI", Tahoma, sans-serif;
+  color: #173531;
+  background: #f5f7f3;
+  --teal: #17665b;
+  --muted: #526860;
+  --line: #dce7e0;
+  --mint: #e5f3ea;
+  --white: #fff;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; min-width: 280px; }
+h1, h2, p { margin: 0; }
+button, textarea { font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: default; opacity: .45; }
+:focus-visible { outline: 3px solid #267e6c; outline-offset: 3px; }
+.symbols { position: absolute; width: 0; height: 0; overflow: hidden; }
+svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.header { min-height: 76px; background: var(--white); border-block-end: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 12px clamp(16px, 5vw, 64px); }
+.brand, .header-actions { display: flex; align-items: center; gap: 12px; }
+.brand strong, .brand small { display: block; }
+.brand small { color: var(--muted); font-size: .8rem; }
+.brand-icon { width: 42px; height: 42px; border-radius: 14px; display: inline-grid; place-items: center; background: var(--mint); color: var(--teal); flex: none; }
+.brand-icon svg { width: 25px; height: 25px; }
+.connection { font-size: .78rem; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.connection::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #987646; }
+.connection[data-online=true]::before { background: #24836d; }
+.language, .panel-link { border: 1px solid var(--line); color: var(--teal); background: var(--white); border-radius: 999px; padding: 7px 12px; white-space: nowrap; }
+.panel-link { display: none; font-size: .8rem; text-decoration: none; }
+.panel-link[data-pending=true] { background: var(--mint); font-weight: 650; }
+.welcome { min-height: calc(100svh - 76px); display: grid; place-items: center; padding: 20px; }
+.welcome-card { width: min(100%, 480px); padding: clamp(24px, 6vw, 54px); text-align: center; background: var(--white); border: 1px solid var(--line); border-radius: 28px; box-shadow: 0 14px 44px #1735310c; }
+.welcome-card .eyebrow { margin-top: 16px; }
+.welcome h1 { font-size: clamp(1.65rem, 4vw, 2.3rem); margin: 12px 0; }
+.welcome h1 span { display: block; }
+.welcome p { color: var(--muted); }
+.language-choices { display: flex; gap: 10px; margin-top: 25px; }
+.language-choices button { flex: 1; padding: 11px 8px; border-radius: 13px; border: 1px solid var(--line); background: var(--mint); color: #154b42; font-weight: 650; }
+.language-choices button:hover, .language:hover { background: #d7ede1; }
+#spoken-replies[aria-pressed="true"] { background: var(--mint); }
+.workspace { display: grid; grid-template-columns: minmax(0, 1fr) minmax(285px, 345px); gap: 20px; max-width: 1430px; margin-inline: auto; padding: 22px clamp(16px, 4vw, 54px); align-items: start; }
+.conversation { background: var(--white); border: 1px solid var(--line); box-shadow: 0 8px 28px #17353108; border-radius: 22px; display: flex; flex-direction: column; height: max(540px, calc(100svh - 120px)); min-width: 0; }
+.conversation-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-block-end: 1px solid var(--line); padding: 18px clamp(14px, 4vw, 30px); }
+.eyebrow { color: var(--teal); font-size: .76rem; font-weight: 650; }
+.conversation h1 { font-size: clamp(1.18rem, 3vw, 1.5rem); margin-top: 3px; }
+.chat-scroll { overflow-y: auto; flex: 1; padding: 18px clamp(14px, 4vw, 36px); }
+.intro { text-align: center; max-width: 400px; margin: clamp(24px, 9vh, 84px) auto 30px; }
+.intro h2 { margin: 12px 0 7px; font-size: clamp(1.28rem, 4vw, 1.8rem); }
+.intro p, .composer-note { color: var(--muted); line-height: 1.55; }
+.messages { display: flex; flex-direction: column; gap: 16px; max-width: 760px; margin-inline: auto; }
+.message { align-self: flex-start; max-width: min(91%, 620px); border-radius: 16px; padding: 10px 14px; background: #f3f6f3; overflow-wrap: anywhere; }
+.message.user { align-self: flex-end; background: var(--mint); }
+.message p { white-space: pre-wrap; line-height: 1.6; text-align: start; }
+.message small { color: var(--muted); display: block; font-size: .72rem; font-weight: 650; margin-bottom: 4px; }
+.loading { color: var(--muted); font-size: .85rem; display: flex; gap: 8px; align-items: center; padding: 14px 0; }
+.loading > span:first-child { width: 9px; height: 9px; background: var(--teal); border-radius: 50%; }
+.composer-area { padding: 8px clamp(12px, 3vw, 28px) 13px; }
+.composer { display: flex; align-items: end; gap: 6px; padding: 6px; border: 1px solid #cbdcd2; border-radius: 24px; box-shadow: 0 3px 14px #1735310b; }
+.composer:focus-within { border-color: #5b9a8a; }
+.composer textarea { resize: none; field-sizing: content; width: 0; min-height: 38px; max-height: 110px; border: 0; outline: none; flex: 1; background: transparent; color: inherit; padding: 8px 6px 7px 11px; }
+.icon-button { display: inline-grid; place-items: center; width: 38px; height: 38px; border-radius: 50%; border: 0; color: var(--teal); background: var(--mint); flex: none; }
+.icon-button:not(:disabled):hover { filter: brightness(.92); }
+.icon-button svg { pointer-events: none; }
+.send { color: white; background: var(--teal); }
+.mic[data-recording=true], .discard { color: #922d34; background: #faeceb; }
+.recording { align-self: center; display: flex; align-items: center; gap: 7px; flex: 1; min-height: 38px; padding-inline-start: 10px; font-size: .85rem; color: #822a30; }
+.recording i { width: 8px; height: 8px; border-radius: 50%; background: #b94249; flex: none; }
+.recording time { direction: ltr; font-variant-numeric: tabular-nums; }
+.composer-note { font-size: .75rem; text-align: center; margin-top: 8px; }
+.error { color: #822a30; background: #fff1f0; border-radius: 10px; padding: 8px 12px; margin-bottom: 8px; font-size: .86rem; }
+.replay { margin-top: 6px; width: 30px; height: 30px; }
+.replay svg { width: 16px; height: 16px; }
+.sidebar, #appointments { display: grid; gap: 12px; min-width: 0; }
+#appointments > section, .clinic-info { background: var(--white); border: 1px solid var(--line); border-radius: 17px; padding: 15px; }
+.sidebar h2 { font-size: 1rem; margin-bottom: 7px; }
+.sidebar p, .sidebar dl { font-size: .85rem; }
+.clinic-info h2 { margin: 3px 0 5px; }
+.clinic-info p, .appt-empty, .appt-filter { color: var(--muted); }
+.appt-month, .appt-nav, .appt-actions { display: flex; align-items: center; gap: 7px; justify-content: space-between; }
+.appt-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); text-align: center; gap: 3px; }
+.appt-weekday { color: var(--muted); padding-block: 6px; font-size: .75rem; }
+.appt-day, .appt-nav button, .appt-calendar button, .appt-list button, .appt-actions button { color: var(--teal); background: #f0f6f2; border: 1px solid transparent; border-radius: 8px; padding: 5px; }
+.appt-day { min-height: 30px; position: relative; }
+.appt-day[aria-pressed=true], .appt-actions .appt-approve { color: white; background: var(--teal); }
+.appt-marker { display: block; position: absolute; inset-inline-start: calc(50% - 2px); bottom: 2px; width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
+.appt-record { border-block-start: 1px solid var(--line); padding-block: 8px; }
+.appt-record h3 { margin: 0 0 3px; font-size: .9rem; }
+.appt-status { color: var(--teal); font-size: .75rem; }
+.appt-status[data-status=cancelled] { color: #89353c; }
+.appt-fields { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 12px; }
+.appt-fields dt { color: var(--muted); }
+.appt-fields dd { margin: 0; overflow-wrap: anywhere; }
+.appt-actions button { padding: 7px 10px; }
+@media (max-width: 760px) {
+  .workspace { grid-template-columns: minmax(0, 1fr); padding: 12px; }
+  .panel-link { display: inline-block; }
+  .conversation { height: max(435px, calc(100svh - 100px)); }
+  .brand strong { font-size: .9rem; }
+  .header { padding-inline: 12px; }
+  .header-actions { gap: 7px; }
+}
+@media (max-width: 360px) {
+  .header .connection { font-size: .68rem; }
+  .brand-icon { width: 35px; height: 35px; }
+}

@@ -1,3 +1,125 @@
+# Zaytoun Family Clinic — AI Voice Receptionist
+
+A bilingual Arabic and English receptionist for a fictional clinic. It helps patients find a suitable appointment, verifies availability through the clinic’s MCP server, and asks the patient to review and approve the exact booking before writing to the clinic.
+
+- Type a request or record it with the browser microphone. Continue the same booking across service, date, time, doctor, name, and phone questions.
+- Review the recognized phone and explicitly confirm it. Use the separate **Confirm booking** button to authorize the booking.
+- Use **My Appointments** or ask “شو مواعيدي؟” or “What did I book last?” for bookings confirmed in this conversation. Selecting a day filters the calendar list. **Show all** clears that filter.
+- Change a selected slot before approval by clearly requesting the new time. For a confirmed booking, the receptionist identifies the session booking or asks for its reference and directs you to the clinic. The clinic API offers separate booking and cancellation operations without a rescheduling operation.
+- Listen to typed or microphone replies, including approval outcomes and server-side errors, replay them, or mute them. Private phone, review, and appointment-history details stay on screen. Gemini receives fixed bilingual prompts for sensitive replies. An unavailable server or speech provider can prevent audio. The browser keeps the written reply and offers replay when a speech ticket is available.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    UI[Browser · Arabic and English] --> API[FastAPI]
+    API --> STT[OpenRouter STT]
+    STT --> Intake[Intake · structured extraction and clarification]
+    API --> Intake
+    Intake --> Graph[LangGraph · conversation state]
+    Graph --> Scheduler[Scheduler · verified slot selection]
+    Scheduler --> MCP[Clinic MCP · stdio]
+    MCP --> Clinic[Simulated Clinic API]
+    Graph --> Review[Phone confirmation and booking review]
+    Review --> Approval[Explicit approval endpoint]
+    Approval --> MCP
+    Approval --> Memory[Session appointment list]
+    Memory --> API
+    API --> TTS[OpenRouter Gemini TTS · Callirrhoe]
+```
+
+Python 3.12, FastAPI, LangGraph, OpenAI SDK through OpenRouter, MCP over stdio, and a browser UI using Web Audio. Intake extracts structured requests and handles clarifications. The scheduler checks clinic policy and tool-returned slots. The approval handler validates the action against session state and submits the approved booking with an idempotency key. See [DESIGN.md](DESIGN.md) and [the clinic kit](kit/README.md).
+
+| Boundary | Implementation |
+|---|---|
+| Clinic reads | `clinic_info`, `list_services`, `find_slots`, `get_patient`, and `get_booking` through MCP |
+| Clinic writes | `create_booking`, `cancel_booking`, and the post-booking `save_patient` through MCP |
+| Transcription | OpenRouter audio transcription, with model configuration in `kit/.env.example` |
+| Speech | OpenRouter Gemini Flash-Lite TTS with Callirrhoe, streamed as PCM |
+| Records | Seeded, simulated clinic API and in-memory conversation state |
+| Automated evaluations | Real FastAPI and graph paths with fixture STT, intake extraction, and clinic tool responses |
+
+The application validates proposed IDs against tool results, checks phone confirmation separately from booking approval, and handles medical, injection, conflict, and tool-failure cases in code. A session appointment list contains only clinic-confirmed bookings from that session and cancellation updates made in that session. History questions preserve active offers and pending approvals.
+
+## Memory and privacy
+
+The session retains the service, preferred date and time, offered and selected slots, provider, patient name, phone confirmation, pending action, and confirmed booking references. A reload starts a new conversation. The receptionist keeps a random browser session identifier in tab memory.
+
+The demo clinic retains patient preferences across assistant sessions while its process is running. A phone lookup can inform a provider preference, but it does not establish the patient’s identity or grant access to appointment history. Both stores are in RAM. Authenticated cross-session history and restart-durable patient memory are unsupported. For older appointments, the receptionist directs the patient to the clinic for identity verification. The existing demo cancellation flow checks the booking reference and matching phone, enforces the clinic’s cancellation window, and requires separate approval.
+
+## Run locally on Windows
+
+Use Python 3.12 and PowerShell. Run these commands from the repository root. Check that `python --version` reports 3.12, or use the full path to your Python 3.12 executable on the first line. Copy the example only when `kit/.env` does not already exist.
+
+```powershell
+python -m venv kit\.venv
+.\kit\.venv\Scripts\python.exe -m pip install -r .\kit\requirements.txt
+Copy-Item .\kit\.env.example .\kit\.env
+```
+
+Set `OPENROUTER_API_KEY` in `kit/.env`. The example also documents the intake and STT model variables, the clinic API key and URL, and the optional frozen clinic clock. Keep credentials local.
+
+For a separate loopback-only demonstration using **synthetic data only**, set
+`ZAYTOUN_DEMO_EXACT_SPEECH=synthetic-only` in that process's environment before launch.
+Gemini then receives the displayed reply verbatim, including synthetic details. The setting
+is disabled by default. Keep it unset for normal conversations and do not expose the
+opted-in process through a proxy.
+
+```powershell
+.\kit\.venv\Scripts\python.exe .\kit\start_demo.py --check
+.\kit\.venv\Scripts\python.exe .\kit\start_demo.py --demo-date 2026-11-12
+```
+
+Open [the local receptionist](http://127.0.0.1:8000/). The launcher starts both services on ports 8000 and 8101 and stops its own processes on Ctrl+C. It reports occupied ports without replacing existing processes. Use localhost or HTTPS and grant browser permission for microphone input. Typed chat remains available when recording or transcription fails. If audio is interrupted, select **Play reply**. See [voice demo and troubleshooting](kit/VOICE_DEMO.md).
+
+## Run with Docker Compose
+
+Start Docker Desktop with its Linux engine. From `kit`, use the same local `.env` setup as above. The app receives environment variables at runtime. Credentials are excluded from the build context.
+
+```powershell
+docker compose config --quiet
+docker compose up --build --wait
+docker compose exec app python check_kit.py
+```
+
+The UI is at [localhost port 8000](http://127.0.0.1:8000/). For a separate test alongside another demo, set `APP_HOST_PORT` and `CLINIC_HOST_PORT` to unused ports and use a unique project name with `docker compose -p zaytoun-test`. Run `docker compose -p zaytoun-test down` to stop that project.
+
+Compose configuration passed validation. Container build, health, and booking verification are blocked on the current Windows host because Docker Desktop fails before the Linux engine starts. The native Python launcher is independent of Docker.
+
+## Evaluation
+
+The [scorecard](kit/evals/scorecard.safe.md) records **20/20** mandatory cases in the shared format, covering booking, clarification, conflicts, rejection, tool failures, guardrails, memory, and voice. The scorecard timings come from fixtures and exclude live model synthesis, microphone capture, and production network latency.
+
+| Category | Passed |
+|---|---:|
+| Happy path | 2/2 |
+| Clarification | 3/3 |
+| Conflict and rejection | 3/3 |
+| Tool failure | 2/2 |
+| Guardrails | 3/3 |
+| Clinic policy | 5/5 |
+| Memory and voice | 2/2 |
+
+```powershell
+Set-Location kit
+.\.venv\Scripts\python.exe -m unittest discover -q
+.\.venv\Scripts\python.exe -B evals/run_safe_evals.py
+Set-Location ..
+node kit/test_clinic_web_browser.mjs
+```
+
+One before/after regression is the written-only phone readback and review. With the fixed speech mapping disabled, the test failed because it received no speech ticket. With the mapping enabled, Arabic and English typed and voice turns issued Callirrhoe tickets, and the captured provider payloads contained only fixed prompts. Browser checks use a fake microphone and fixture HTTP responses.
+
+## Known limitations and team contributions
+
+One live synthetic Arabic phone attempt normalized correctly and reached phone confirmation. An earlier attempt returned a format error without capturing the rejected transcript. Intermittent recognition and live speaker startup latency remain unverified. The project depends on OpenRouter availability and model access for extraction, transcription, and synthesis. The simulated clinic and conversation stores are single-process. A production deployment would need authenticated patient access and durable storage. The team delivered the live presentation. The required recorded demo video is outstanding.
+
+The documented division of work assigns intake, graph state, approval, and guardrails to Developer A, and scheduling, MCP, API/UI integration, and evaluations to Developer B. See [TEAM_PLAN.md](TEAM_PLAN.md). The original trainer brief is preserved below.
+
+---
+
+## Brief المدرّب الأصلي — محفوظ للمرجع
+
 <!-- JHF-BRAND -->
 <div align="center" style="padding:28px 20px; background:#ffffff; border:2px solid #e0e0e0; border-radius:12px;">
   <p style="margin:0 0 16px 0;">
@@ -101,9 +223,10 @@ object (`service_id`, `date`, `time_window`, `patient`, `proposed_slots`,
 | `services/clinic_mcp.py` | The **MCP server** in front of it (stdio). Your agent reaches the clinic **only** through this. |
 | `services/data/` | Fictional clinic, 6 services (with Arabic names), 5 providers, 4 returning patients, seeded bookings, **engineered conflicts** listed in the kit README |
 | `voice/stt.py` | Speech-to-text: **OpenRouter** (default, about a cent per hundred clips) or local Whisper |
-| `voice/tts.py` | Text-to-speech: **Piper** offline neural voices, English (a public-domain voice) and Arabic, downloaded on first use; or the browser's own voice. The kit README lists each voice's licence. |
+| `integrations/clinic_speech.py` | Streams OpenRouter Gemini Callirrhoe audio for public Arabic and English clinic replies. |
 | `samples/audio/` | Recorded requests (English and Arabic) for your tests, with their exact text |
-| `ui/app_ui.py` | A small Gradio client of the contract: microphone, transcript, approval card, spoken reply. Keep it, restyle it, or replace it. |
+| `ui/web/` | Bilingual clinic interface served by FastAPI with chat, recording, appointment review, and a calendar. |
+| `ui/app_ui.py` | Legacy Gradio client for the same API. |
 | `evals/` | Sample cases + the shared runner |
 | `check_kit.py` | Prints **✅ Kit ready.** when the clinic API, the MCP server and the voice setup all answer |
 

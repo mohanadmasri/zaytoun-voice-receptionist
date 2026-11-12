@@ -50,8 +50,8 @@ async def main():
         "requested_time": "16:30",
         "provider_choice": "specific",
         "provider_id": "dr_nassar",
-        "patient_name": "Test Patient",
-        "patient_phone": "0599000999",
+        "patient_name": "Lina Mansour",
+        "patient_phone": "0599000999", "confirmed_phone": "0599000999",
     })
 
     # 1. Correct time search parameters.

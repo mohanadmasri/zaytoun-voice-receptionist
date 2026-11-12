@@ -29,6 +29,7 @@ from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from core.phone import normalize_patient_phone
 
 HERE = Path(__file__).resolve().parent
 DATA = HERE / "data"
@@ -79,20 +80,11 @@ def weekday(d: date) -> str:
     return WEEKDAYS[d.weekday()]
 
 
-ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
-
-
 def norm_phone(raw: str) -> str:
-    """Accepts 0599000111, 0599 000 111, +970 599 000 111, Arabic-Indic digits."""
-    s = re.sub(r"[\s\-.()/]", "", str(raw or "").translate(ARABIC_DIGITS))
-    s = s[1:] if s.startswith("+") else s
-    s = s[2:] if s.startswith("00") else s
-    for cc in ("970", "972"):
-        if s.startswith(cc) and len(s) == 12:
-            s = "0" + s[3:]
-    if not re.fullmatch(r"0\d{8,9}", s):
-        raise ApiError(400, "invalid_phone", f"'{raw}' is not a valid phone number. Use a local number such as 0599000111.")
-    return s
+    phone = normalize_patient_phone(raw)
+    if phone is None:
+        raise ApiError(400, "invalid_phone", "Provide a complete phone number with a supported prefix.")
+    return phone
 
 
 def clinic_now(tz: ZoneInfo) -> datetime:
@@ -105,7 +97,14 @@ def clinic_now(tz: ZoneInfo) -> datetime:
             raise RuntimeError(f"CLINIC_TODAY='{fixed}' is not a date (YYYY-MM-DD).") from None
         t = to_min(os.getenv("CLINIC_TIME") or "08:00")
         return datetime(d.year, d.month, d.day, t // 60, t % 60, tzinfo=tz)
-    return datetime.now(tz).replace(second=0, microsecond=0)
+    return datetime.now(tz)
+
+
+def slot_has_passed(day: date, start: int, now: datetime) -> bool:
+    minute = now.hour * 60 + now.minute
+    return day < now.date() or (
+        day == now.date() and (start < minute or (start == minute and bool(now.second or now.microsecond)))
+    )
 
 
 class Store:
@@ -285,8 +284,7 @@ class Store:
             t = hrs[0]
             while t + svc["duration_min"] <= hrs[1]:
                 in_window = (after is None or t >= after) and (before is None or t < before)
-                future = d > now.date() or (d == now.date() and t >= now.hour * 60 + now.minute)
-                if in_window and future and self._free(pid, d, t, t + svc["duration_min"]):
+                if in_window and not slot_has_passed(d, t, now) and self._free(pid, d, t, t + svc["duration_min"]):
                     out.append(self.slot_view(svc, d, t, self.providers[pid]))
                 t += GRID
         return sorted(out, key=lambda s: (s["date"], s["start"], s["provider_id"]))
@@ -549,7 +547,7 @@ async def create_booking(body: BookingIn, request: Request):
     now, last, dur = STORE.now(), STORE.last_bookable_day(), svc["duration_min"]
     hrs = STORE.hours(d)
     label = f"{weekday(d).capitalize()} {d.isoformat()}"
-    if d < now.date() or (d == now.date() and start < now.hour * 60 + now.minute):
+    if slot_has_passed(d, start, now):
         raise ApiError(422, "policy_violation", f"{label} {hhmm(start)} is in the past.")
     if d > last:
         raise ApiError(422, "policy_violation", f"Bookings open {STORE.policy['booking_window_days']} days ahead. The last bookable day is {last.isoformat()}.")

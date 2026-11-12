@@ -18,6 +18,11 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 - `POST /api/chat` مع `session_id` و`message`، واختياريًا `user`.
 - `POST /api/approve` مع `session_id` و`action_id` و`approved` كقيمة boolean.
 - `POST /api/voice` مع multipart يحتوي `session_id` وملف `audio` بصيغة WAV أو MP3.
+- `POST /api/voice/confirm` مع `session_id` و`transcript_token` بعد مراجعة التفريغ.
+
+`/api/voice` يفرغ التسجيل ويشغل المحادثة تلقائيًا، ولا يوافق على الحجز. الواجهة ترسله
+عند إيقاف التسجيل؛ التصحيح متاح بالنص. /api/voice/confirm يبقى لتوافق preview_only القديم،
+ولا يظهر في الواجهة العادية. [تدقيق الاكتمال](../COMPLETION_AUDIT_AR.md).
 
 استخدم `session_id` نفسه لكل رسائل المحادثة وقرار الموافقة.
 نقطة الموافقة لا تقبل تفاصيل الحجز من المتصفح؛ تقرأ العملية المحفوظة.
@@ -39,3 +44,7 @@ python ui/app_ui.py
 يوجد زر Replay لإعادة سماع الرد إذا منع المتصفح التشغيل التلقائي.
 
 تفاصيل التشغيل والديمو وحدود الأخطاء والاختبارات في [VOICE_DEMO.md](../VOICE_DEMO.md).
+
+تفاصيل المحادثة العربية والعرض دون معرفات والاختيار بالوقت واسم الطبيب في
+[ARABIC_UX.md](../ARABIC_UX.md). إعادة تشغيل API وGradio مطلوبة لتحميل تغييرات
+Python وJavaScript إذا لم تكونا تعملان مع إعادة تحميل تلقائية.

@@ -14,6 +14,7 @@ import logging
 import os
 import sys
 import time
+import re
 from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
@@ -21,6 +22,33 @@ from mcp.client.stdio import stdio_client
 
 
 logger = logging.getLogger(__name__)
+
+
+# يسجل أربعة حقول من رفض العيادة فقط، مع تنقيح القيم الشخصية من الرسالة قبل تسجيلها.
+def sanitized_clinic_error(response: dict, args: dict) -> dict:
+    error = response.get("error") or {}
+    message = str(error.get("message") or "Clinic rejected the request")
+    raw = message.casefold()
+    fields = [field for field in ("patient.name", "patient.phone", "patient.guardian_name", "patient.age", "slot_id", "service_id", "notes") if field in raw]
+    if "guardian" in raw and "patient.guardian_name" not in fields:
+        fields.append("patient.guardian_name")
+    if "upcoming appointments" in raw or "maximum per patient" in raw:
+        fields.extend(["patient.phone", "policies.max_upcoming_bookings_per_patient"])
+    elif any(phrase in raw for phrase in ("in the past", "bookings open", "closed on", "does not work", "must start between")):
+        fields.append("slot_id")
+    def redact_values(data):
+        nonlocal message
+        for key, value in data.items():
+            if isinstance(value, dict):
+                redact_values(value)
+            elif key in ("patient_name", "patient_phone", "guardian_name", "name", "phone", "notes") and isinstance(value, str) and value:
+                message = re.sub(re.escape(value), "[redacted]", message, flags=re.I)
+    redact_values(args)
+    message = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", "[redacted]", message)
+    message = re.sub(r"\+?\d[\d\s()./-]{6,}\d", "[redacted]", message)
+    code = str(error.get("code") or "clinic_error")
+    return {"status": response.get("status"), "code": code if re.fullmatch(r"[a-z_][a-z0-9_]{0,59}", code) else "clinic_error",
+            "message": message[:500], "rejected_fields": sorted(set(fields))}
 
 
 READ_TOOLS = frozenset({
@@ -122,6 +150,10 @@ class ClinicGateway:
             )
 
             success = response.get("ok") is True
+            if not success and response.get("status") in (400, 422):
+                detail = sanitized_clinic_error(response, args)
+                logger.warning("clinic_validation_error status=%s code=%s message=%s rejected_fields=%s",
+                               detail["status"], detail["code"], detail["message"], detail["rejected_fields"])
             return response
 
         except asyncio.TimeoutError:
@@ -136,9 +168,8 @@ class ClinicGateway:
             }
 
         except Exception as exc:
-            logger.exception(
-                "MCP request failed: %s", tool_name
-            )
+            # نوع الخطأ واسم الأداة فقط؛ traceback قد يحتوي URL هاتف أو بيانات حساسة.
+            logger.warning("MCP request failed tool=%s type=%s", tool_name, type(exc).__name__)
 
             return {
                 "ok": False,

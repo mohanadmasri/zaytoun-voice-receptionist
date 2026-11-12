@@ -10,7 +10,7 @@ and must never create a booking without explicit patient approval.
 
 
 <!--
-المريض يرسل طلبه صوتيًا أو كتابيًا عبر Gradio UI.
+المريض يرسل طلبه صوتيًا أو كتابيًا عبر واجهة العيادة في المتصفح.
 يستقبل FastAPI الطلب ويمرره إلى LangGraph الذي ينظم سير العمل.
 الـIntake يفهم الطلب، والـScheduler يبحث عن المواعيد عبر MCP.
 الـMCP Gateway يتواصل مع نظام العيادة للحصول على بيانات حقيقية.
@@ -22,7 +22,7 @@ and must never create a booking without explicit patient approval.
 
 The system consists of the following components:
 
-1. Gradio UI: Receives patient text or voice requests.
+1. Browser UI served by FastAPI: Receives patient text or voice requests and renders the calendar, appointment list, and approval controls. Gradio remains a legacy client.
 2. FastAPI Backend: Handles incoming requests and responses.
 3. LangGraph: Coordinates the conversation and agent workflow.
 4. Intake Agent: Understands the request and collects missing details.
@@ -32,6 +32,16 @@ The system consists of the following components:
 8. Approval Handler: Executes bookings only after explicit approval.
 
 The system uses session memory to maintain conversation context.
+
+The app and clinic run as separate services under Docker Compose. The app starts after
+the clinic health check passes and runs its MCP client over stdio. Model credentials are
+provided to the app at runtime. The native Windows launcher runs the same two services.
+
+The browser requests speech through a short-lived server ticket. Known public replies
+can be spoken directly. Sensitive or unclassified text gets a fixed bilingual companion.
+Only a successful clinic result can trigger a spoken booking or cancellation confirmation.
+An explicit synthetic-only option permits verbatim speech on direct loopback requests.
+Normal sessions retain the privacy-safe speech policy.
 
 
 <!--
@@ -170,7 +180,7 @@ Long-Term Memory:
 
 لا نحتاج Vector Database لأن البحث برقم الهاتف مباشر ولا يتطلب بحثًا دلاليًا.
 -->
-## 5. Persistent Memory
+## 5. Conversation and Patient Memory
 
 The system uses two types of memory.
 
@@ -179,27 +189,21 @@ The system uses two types of memory.
 Conversation state is stored in a SessionStore,
 identified by session_id.
 
-This allows the system to remember collected information
-across multiple messages in the same conversation.
+The state retains service, date and time, offers, selected slot and provider, patient details,
+phone confirmation, and pending approval. Successful approval adds a clinic-returned booking
+to the session appointment list. A successful cancellation updates an existing entry in that list.
+History questions read the list without changing the active booking workflow.
+Confirmed appointment changes are referred to the clinic after identifying the authorized
+session booking. The existing API supports creation and cancellation as separate actions.
 
-### Long-Term Patient Memory
+### Returning Patients
 
-The system uses the clinic's patient records through MCP.
-
-When a patient provides a phone number, the system calls
-get_patient to retrieve existing information and preferences.
-
-Known preferences may help personalize appointment suggestions,
-but the patient's current request always takes priority.
-
-After a successful booking, the system may update relevant
-patient information through the clinic's supported tools.
-
-Only necessary patient information is stored.
-Medical diagnoses and sensitive medical details are excluded.
-
-The demo clinic stores its data in memory, so patient records
-are not guaranteed to survive a clinic service restart.
+The demo clinic's in-memory patient records can carry preferences between assistant sessions.
+The agent can use a provider preference from MCP and gives the current request priority.
+A phone match does not fill in a patient name or authorize access to private appointments.
+The assistant directs cross-session history requests to the clinic for identity verification.
+Patient records, booking records, and conversation state are lost when their respective
+services restart. The demo has no authenticated cross-session history.
 
 
 

@@ -49,7 +49,7 @@ def seed(label):
                   "service_text": "dental checkup", "service_id": "dental_checkup",
                   "date_text": "November 3, 2026", "requested_date": "2026-11-03",
                   "time_text": "after 3 PM", "time_kind": "window", "time_after": "15:01",
-                  "patient_name": "Test Patient", "patient_phone": "0599000999",
+                  "patient_name": "Lina Mansour", "patient_phone": "0599000999", "confirmed_phone": "0599000999",
                   "stage": "slots_proposed", "proposed_slots": [slot()]})
     session_store.save(state)
     return session_id

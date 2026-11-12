@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Zaytoun Family Clinic</title>
+  <link rel="stylesheet" href="/clinic-assets/clinic.css">
+  <script type="module" src="/clinic-assets/clinic.js"></script>
+</head>
+<body>
+  <svg class="symbols" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="olive" viewBox="0 0 24 24"><path d="M5 20C9 16 12 12 16 5M10 14C5 14 4 10 4 8c4 0 7 2 6 6Zm3-4c-1-4 1-7 5-8 1 4-1 7-5 8Zm-2 4c4-4 7-3 10-2-2 4-6 5-10 2Z"/></symbol>
+    <symbol id="microphone" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11v1a7 7 0 0 0 14 0v-1M12 19v3m-3 0h6"/></symbol>
+    <symbol id="arrow" viewBox="0 0 24 24"><path d="M12 19V5m-6 6 6-6 6 6"/></symbol>
+    <symbol id="stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor"/></symbol>
+    <symbol id="trash" viewBox="0 0 24 24"><path d="M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15m-8 4v7m4-7v7"/></symbol>
+    <symbol id="speaker" viewBox="0 0 24 24"><path d="M4 9h4l5-4v14l-5-4H4zm12 0a4 4 0 0 1 0 6m3-9a8 8 0 0 1 0 12"/></symbol>
+  </svg>
+  <header class="header">
+    <div class="brand">
+      <span class="brand-icon"><svg><use href="#olive"></use></svg></span>
+      <div><strong data-label="brand">Zaytoun Family Clinic</strong><small data-label="subtitle">Digital reception</small></div>
+    </div>
+    <div class="header-actions" id="header-actions" hidden>
+      <span class="connection" id="connection" role="status"></span>
+      <button class="language" id="language" type="button" lang="ar">العربية</button>
+    </div>
+  </header>
+  <main class="welcome" id="welcome">
+    <section class="welcome-card" aria-labelledby="welcome-title">
+      <span class="brand-icon"><svg><use href="#olive"></use></svg></span>
+      <p class="eyebrow" lang="ar" dir="rtl">عيادة الزيتون للعائلة</p>
+      <h1 id="welcome-title">Welcome <span lang="ar" dir="rtl">أهلًا وسهلًا</span></h1>
+      <p>Choose your language <span aria-hidden="true">·</span> <span lang="ar" dir="rtl">اختر لغتك</span></p>
+      <div class="language-choices">
+        <button id="choose-ar" lang="ar" dir="rtl" type="button">العربية</button>
+        <button id="choose-en" lang="en" type="button">English</button>
+      </div>
+    </section>
+  </main>
+  <main class="workspace" id="workspace" hidden>
+    <section class="conversation" aria-labelledby="chat-title">
+      <div class="conversation-top">
+        <div><p class="eyebrow" data-label="subtitle">Digital reception</p><h1 id="chat-title" tabindex="-1" data-label="title">Appointment assistant</h1></div>
+        <button class="language" id="spoken-replies" type="button" aria-pressed="true" data-label="spokenReplies">Spoken replies</button>
+        <a class="panel-link" id="panel-link" href="#appointments">My Appointments</a>
+      </div>
+      <div class="chat-scroll" id="chat-scroll">
+        <div class="intro" id="intro">
+          <span class="brand-icon"><svg><use href="#olive"></use></svg></span>
+          <h2 data-label="greeting">How can we help you?</h2>
+          <p data-label="intro">Ask about clinic services, find a time, or review an appointment. You can type or use the microphone.</p>
+        </div>
+        <div id="messages" class="messages" role="log" aria-label="Conversation" aria-live="polite"></div>
+        <div id="loading" class="loading" role="status" hidden><span></span><span id="loading-label"></span></div>
+      </div>
+      <div class="composer-area">
+        <p class="error" id="error" role="alert" hidden></p>
+        <p class="composer-note" id="speech-status" role="status" hidden></p>
+        <form id="composer" class="composer">
+          <textarea id="message" rows="1" maxlength="4000" aria-label="Message" placeholder="Message the receptionist…"></textarea>
+          <div id="recording" class="recording" role="status" hidden><i></i><span id="record-label"></span><time id="timer" aria-hidden="true"></time></div>
+          <button id="cancel-recording" class="icon-button discard" type="button" hidden><svg><use href="#trash"></use></svg></button>
+          <button id="mic" class="icon-button mic" type="button"><svg><use href="#microphone"></use></svg></button>
+          <button id="send" class="icon-button send" type="submit"><svg><use href="#arrow"></use></svg></button>
+        </form>
+        <p class="composer-note" data-label="approvalNote">You’ll review the details before confirming a booking or cancellation.</p>
+      </div>
+    </section>
+    <aside class="sidebar">
+      <div id="appointments" tabindex="-1"></div>
+      <section class="clinic-info">
+        <p class="eyebrow" data-label="subtitle">Digital reception</p>
+        <h2 data-label="clinicInfo">About the clinic</h2>
+        <p data-label="clinicBody">Bilingual reception for the simulated Zaytoun Family Clinic.</p>
+      </section>
+    </aside>
+  </main>
+</body>
+</html>

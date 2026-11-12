@@ -18,6 +18,7 @@ class ToolCall(TypedDict):
 
 
 class PendingAction(TypedDict):
+    memory: NotRequired[dict[str, Any]]
     action_id: str
     type: Literal["create_booking", "cancel_booking"]
     summary: str
@@ -25,6 +26,13 @@ class PendingAction(TypedDict):
 
 
 class ChatResponse(TypedDict):
+    appointment_history: NotRequired[bool]
+    appointment_selection_changed: NotRequired[bool]
+    timings: NotRequired[dict[str, float | None]]
+    transcript_token: NotRequired[str]
+    needs_transcript_confirmation: NotRequired[bool]
+    session_reset: NotRequired[bool]
+    language: NotRequired[str]
     session_id: str
     reply: str
     tool_calls: list[ToolCall]
@@ -43,4 +51,4 @@ class ClinicGateway(Protocol):
     async def call_write(
         self, tool_name: str, args: dict[str, Any]
     ) -> dict[str, Any]: ...
-    
+
