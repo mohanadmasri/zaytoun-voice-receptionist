@@ -5,9 +5,29 @@
 # لا يتصل بالعيادة ولا ينشئ أي حجز.
 
 import re
-from datetime import date
+from datetime import date, datetime, time
 
 from agent.state import AgentState
+
+
+def clinic_local_now(calendar: dict) -> datetime | None:
+    try:
+        return datetime.fromisoformat(calendar.get("now"))
+    except (TypeError, ValueError):
+        return None
+
+
+def appointment_has_passed(state: AgentState, day: str, clock: str | None = None) -> bool:
+    now = clinic_local_now(state.get("clinic_calendar") or {})
+    today = now.date().isoformat() if now else state.get("clinic_today")
+    if today and day < today:
+        return True
+    if not now or day != today or clock is None:
+        return False
+    try:
+        return time.fromisoformat(clock) < now.time()
+    except (TypeError, ValueError):
+        return False
 
 
 # بصمة القيود المتحققة تربط قائمة البدائل بالطلب الذي أنتجها، ولا تشمل لغة العرض أو بيانات المريض.
@@ -176,6 +196,8 @@ def slot_matches_request(
     try:
         start_minutes = _minutes(slot.get("start"))
     except (ValueError, TypeError):
+        return False
+    if appointment_has_passed(state, slot["date"], slot["start"]):
         return False
 
     kind = state.get("time_kind", "missing")

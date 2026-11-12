@@ -16,8 +16,11 @@ from agent.state import AgentState
 from agent.slot_handoff import slot_matches_offer
 from agent.presentation import say, display_date, display_time, provider_label
 from agent.times import (
-    ARABIC_HOURS, has_incomplete_arabic_relative_time, normalize_clock_words, normalize_time, period_reply,
+    ARABIC_HOURS, has_incomplete_arabic_relative_time, has_malformed_clock, normalize_clock_words,
+    normalize_time, period_reply,
 )
+
+BARE_COMPACT_CLOCK = re.compile(r"\s*([1-9])([0-5][0-9])\s*")
 
 
 # تستقبل قائمة المواعيد المصفاة وتعيد نصًا مرقمًا بنفس ترتيبها دون فرز أو نسخ مواعيد.
@@ -74,6 +77,7 @@ def normalize_spoken_options(message: str) -> str:
 # القائمة الفارغة تعني صيغة رقمية غير صالحة. لا نفسر الهاتف أو ساعة الموعد كرقم خيار.
 # تدعم الأرقام العربية والفارسية؛ التحقق من الحدود يتم مقابل القائمة الحالية فقط.
 def extract_option_numbers(message: str) -> list[int] | None:
+    message = re.sub(r"^\s*رقم\s+", "الخيار ", message)
     text = normalize_spoken_options(message).translate(str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789"))
     number_list = r"[+-]?\d+(?:\.\d+)?(?:\s*(?:,|،|and\b|or\b|و|أو)\s*[+-]?\d+(?:\.\d+)?)*"
     bare = re.fullmatch(rf"\s*({number_list})\s*[.!]?\s*", text, re.IGNORECASE)
@@ -95,6 +99,8 @@ def extract_option_numbers(message: str) -> list[int] | None:
         values = [match.group(1) for match in labelled]
     elif re.search(r"\b(?:options?|choices?)\b|الخيار", text, re.IGNORECASE):
         if re.search(r"\b(?:option|choice)\s+with\b|الخيار\s+(?:مع|عند)", text, re.I):
+            return None
+        if re.search(r"\b(?:option|choice)\s+at\b|الخيار\s+(?:على\s+)?الساع[ةه]", text, re.I) and offered_clock_times(message):
             return None
         return []
     else:
@@ -193,6 +199,10 @@ def filter_by_provider(
             required_name = {"sami", "nassar"}
         if required_name == {"rania", "houri"}:
             required_name = {"rania", "khoury"}
+    arabic_name = re.search(r"(?:الدكتورة?|دكتورة?|د\.)\s+([\u0621-\u064a]+)\s+([\u0621-\u064a]+)\s*[.!؟?]?$",
+                            provider_message.strip())
+    if arabic_name and offered_clock_times(message, offered_context=True):
+        required_name = set(normalize_service_text(" ".join(arabic_name.groups())).split())
     scores = []
     for slot in slots:
         provider = next((p for p in state.get("provider_catalog", []) if p.get("id") == slot.get("provider_id")), {})
@@ -206,9 +216,9 @@ def filter_by_provider(
 
 # تكتشف إشارة اختيار من القائمة الحالية؛ تستثني تقديم الاسم والهاتف من مطابقة اسم الطبيب.
 def has_slot_reference(state: dict, message: str) -> bool:
-    if state.get("proposed_slots") and offered_clock_times(message) is not None:
+    if state.get("proposed_slots") and offered_clock_times(message, offered_context=True) is not None:
         return True
-    return bool(single_option_reference(state, message) or (state.get("proposed_slots") and re.search(r"\b(?:dr|doctor)\b|دكتور|دكتورة", message, re.I)) or (period_reply(message) and state.get("selection_candidates")) or extract_option_numbers(message) is not None or re.search(r"\d{1,2}:\d{2}", normalize_clock_words(message))
+    return bool(_offered_slot_agreement(state, message) or (state.get("proposed_slots") and re.search(r"\b(?:dr|doctor)\b|دكتور|دكتورة", message, re.I)) or (period_reply(message) and state.get("selection_candidates")) or extract_option_numbers(message) is not None or re.search(r"\d{1,2}:\d{2}", normalize_clock_words(message))
                 or "SL-" in message.upper()
                 or (filter_by_provider(state.get("proposed_slots", []), message, state)
                     and not re.search(r"اسمي|رقمي|my name|phone", message, re.IGNORECASE)))
@@ -216,48 +226,94 @@ def has_slot_reference(state: dict, message: str) -> bool:
 
 # الإشارة إلى هذا الموعد لا تُفهم كاختيار إلا إذا بقي خيار واحد فعلي في القائمة الحالية.
 def single_option_reference(state: dict, message: str) -> bool:
-    return len(state.get("proposed_slots", [])) == 1 and bool(re.fullmatch(
-        r"\s*(?:(?:(?:I want|I choose|I would like)\s+)?(?:this option|that appointment|this appointment|that option)|(?:بدي\s+)?(?:هاد الموعد|هذا الموعد|هالخيار|هذا الخيار))\s*[.!؟?]?\s*", message, re.I))
+    return _offered_slot_agreement(state, message) and len(_eligible_offers(state)) == 1
+
+
+def _eligible_offers(state: dict) -> list[dict]:
+    return [slot for slot in state.get("proposed_slots") or [] if slot_matches_offer(state, slot)]
+
+
+def _offered_slot_agreement(state: dict, message: str) -> bool:
+    if (state.get("time_change_pending") or state.get("selected_slot_id")
+            or not state.get("proposed_slots")
+            or state.get("stage") not in ("slots_proposed", "awaiting_slot_selection")):
+        return False
+    text = re.sub(r"[\u064b-\u065f\u0670]", "", message).strip()
+    if re.fullmatch(
+        r"(?:yes(?: please)?|okay|ok|sure|sounds good|works for me|that works"
+        r"|(?:تمام|ماشي|نعم|أيوه|ايوه|اه|آه|أكيد)(?:[،,\s]+(?:مناسب|بناسبني))?|موافق(?:ة)?|مناسب)[.!،,\s]*",
+        text, re.I,
+    ):
+        return True
+    text = re.sub(r"^(?:yes|okay|ok|sure|تمام|ماشي|نعم|أيوه|ايوه|اه|آه|أكيد)[،,\s]+", "", text, flags=re.I)
+    return bool(re.fullmatch(
+        r"(?:(?:(?:I want|I choose|I would like|I'll take)\s+)?(?:this|that)(?: (?:option|appointment|time|one))?"
+        r"(?:\s+(?:works for me|is good|is fine|please))?"
+        r"|(?:(?:بدي|موافق(?:ة)?\s+على)\s+)?(?:هاد الموعد|هدا الموعد|هذا الموعد|هالموعد|هالخيار|هذا الخيار|هالوقت)"
+        r"(?:\s+(?:بناسبني|يناسبني|مناسب(?:\s+(?:لي|إلي|الي|إللي))?|تمام))?"
+        r"|مناسب\s+(?:لي|إلي|الي|إللي))[.!؟?\s]*", text, re.I))
 
 
 # تعيد الساعات المحتملة لوقت غير موسوم بالصباح/المساء، ولا تختار إلا من المواعيد المعروضة.
 # عند وجود 03:45 و15:45 معًا يبقى الاختيار غامضًا بدل افتراض فترة زمنية.
 def has_ambiguous_compact_time(message: str) -> bool:
-    return bool(re.search(r"\bat\s+\d{3}\b", message, re.I))
+    return bool(re.search(r"\bat\s+\d{3}\b|\b\d{3}(?:\s+\d{3})*\s*[ap]\.?\s*m\b", message, re.I))
 
 
-def offered_clock_times(message: str) -> list[str] | None:
+def offered_clock_times(message: str, *, offered_context=False) -> list[str] | None:
     # A compact transcription such as "at 150" does not identify a clock time.
     if has_ambiguous_compact_time(message) or has_incomplete_arabic_relative_time(message):
         return []
-    text = normalize_clock_words(message).translate(str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789"))
+    text = normalize_clock_words(message)
+    if has_malformed_clock(text) or re.search(r"\bالساع[ةه]\s+[^،,.!?؟:]+\s+(?:دقيقة|دقايق|دقائق)\b", text):
+        return []
     # Treat a spoken hour after the Arabic clock cue like a clock without AM/PM.
-    arabic_hours = {**ARABIC_HOURS, "اثنتين": 2, "إثنتين": 2}
-    hour_words = "|".join(re.escape(word) for word in sorted(arabic_hours, key=len, reverse=True))
-    text = re.sub(rf"\bالساعة\s+({hour_words})(?!\w)",
-                  lambda match: f"{arabic_hours[match[1]]}:00", text)
-    # An explicit hour with AM/PM is a clock reference even without minutes.
+    hour_words = "|".join(re.escape(word) for word in sorted(ARABIC_HOURS, key=len, reverse=True))
+    text = re.sub(rf"\bالساع[ةه]\s+({hour_words})(?!\w)",
+                  lambda match: f"{ARABIC_HOURS[match[1]]}:00", text)
+    if offered_context:
+        text = re.sub(
+            rf"^\s*(?:موعد\s+)?(?:ال)?({hour_words})(?=\s*(?:$|[.!؟?]|صباح|الصبح|مساء|العصر|مع\b))",
+            lambda match: f"{ARABIC_HOURS[match[1]]}:00", text,
+        )
+    text = re.sub(r"\bالساع[ةه]\s+(\d{1,2})(?![\w:])", lambda match: f"{int(match[1])}:00", text)
+    # AM/PM and o'clock identify a clock reference even without minutes.
     meridiem = r"[ap]\.?\s*m\.?"
-    hour_word = r"one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve"
+    english_hours = "one two three four five six seven eight nine ten eleven twelve".split()
+    hour_pattern = rf"(?:\d{{1,2}}|{'|'.join(english_hours)})"
+    oclock = r"\s+o['’]?clock\b"
     tokens = re.findall(
-        rf"\b(?:\d{{1,2}}:\d{{2}}(?:\s*{meridiem})?|(?:\d{{1,2}}|{hour_word})\s*{meridiem})(?!\w)",
+        rf"\b(?:\d{{1,2}}:\d{{2}}(?:\s*{meridiem})?|{hour_pattern}(?:{oclock}(?:\s*{meridiem})?|\s*{meridiem}))(?!\w)",
         text, re.I,
     )
     if not tokens:
+        if re.search(r"\bat\s+", text, re.I) and normalize_time(text)["kind"] == "ambiguous":
+            candidates = [normalize_time(f"{text} {period}")["requested_time"] for period in ("AM", "PM")]
+            if all(candidates):
+                return candidates
         return None
     if len(tokens) != 1:
         return []
-    if re.search(meridiem, tokens[0], re.I):
-        value = normalize_time(tokens[0])["requested_time"]
+    if re.search(r"\ba\.?\s*m\b", text, re.I) and re.search(r"\bp\.?\s*m\b", text, re.I):
+        return []
+    token = tokens[0]
+    if re.search(meridiem, token, re.I):
+        value = normalize_time(token)["requested_time"]
         return [value] if value else []
-    value = extract_time(tokens[0])
+    if re.search(oclock, token, re.I):
+        hour_text = token.split()[0].casefold()
+        hour_number = int(hour_text) if hour_text.isdigit() else english_hours.index(hour_text) + 1
+        if not 1 <= hour_number <= 12:
+            return []
+        token = f"{hour_number}:00"
+    value = extract_time(token)
     if value is None:
         return []
     hour, minute = map(int, value.split(":"))
-    if hour > 12 or tokens[0].startswith("0"):
+    if hour > 12 or token.startswith("0"):
         return [value]
-    am = bool(re.search(r"صباح|الصبح|\bmorning\b", text, re.I))
-    pm = bool(re.search(r"مساء|العصر|بعد الظهر|\b(?:afternoon|evening)\b", text, re.I))
+    am = bool(re.search(r"صباح|الصبح|قبل الظهر|\bmorning\b", text, re.I))
+    pm = bool(re.search(r"مساء|\bالمسا\b|العصر|بعد الظهر|\b(?:afternoon|evening)\b", text, re.I))
     if am and pm:
         return []
     if pm:
@@ -299,12 +355,16 @@ def select_slot(
     if re.search(r"\b(?:old|previous|earlier)\s+(?:list|options?)\b|القائمة\s+القديمة|الخيارات\s+السابقة",
                  message, re.IGNORECASE):
         return rejected
-    numbers = extract_option_numbers(message)
-    if single_option_reference(state, message):
-        numbers = None
+    agreement = _offered_slot_agreement(state, message)
+    bare_nine = re.fullmatch(r"\s*تسع[ةه]?\s*[.!؟?]?\s*", normalize_clock_words(message))
+    numbers = None if agreement or bare_nine else extract_option_numbers(message)
+    compact_clock = None
     matches = slots
     has_selection = False
-    if single_option_reference(state, message):
+    if agreement:
+        matches = _eligible_offers(state)
+        if len(matches) != 1:
+            return rejected
         has_selection = True
     period = period_reply(message)
     if period and state.get("selection_candidates"):
@@ -312,10 +372,13 @@ def select_slot(
                    and ((int(slot["start"][:2]) < 12) == (period == "AM"))]
         has_selection = True
     if numbers is not None:
-        if len(numbers) != 1 or not 1 <= numbers[0] <= len(slots):
-            return rejected
-        matches = [slots[numbers[0] - 1]]
-        has_selection = True
+        if len(numbers) == 1 and 1 <= numbers[0] <= len(slots):
+            matches = [slots[numbers[0] - 1]]
+            has_selection = True
+        else:
+            compact_clock = BARE_COMPACT_CLOCK.fullmatch(message)
+            if compact_clock is None:
+                return rejected
 
     id_matches = find_slots_by_id(slots, message)
     # معرّف SL قديم أو مجهول لا يجوز تجاهله حتى لو رافقه رقم خيار صحيح.
@@ -329,7 +392,7 @@ def select_slot(
         matches = [slot for slot in matches if slot is id_matches[0]]
         has_selection = True
 
-    clock_times = offered_clock_times(message)
+    clock_times = offered_clock_times(f"{compact_clock[1]}:{compact_clock[2]}" if compact_clock else message, offered_context=True)
     if clock_times is not None:
         if not clock_times:
             return rejected
@@ -351,6 +414,10 @@ def select_slot(
     if not has_selection or not matches:
         return rejected
     if len(matches) > 1:
+        if clock_times and len({slot["start"] for slot in matches}) > 1:
+            return {**rejected, "selection_candidates": [slot["slot_id"] for slot in matches],
+                    "reply": say(state, "Did you mean morning or afternoon?",
+                                 "قصدك صباحًا ولا مساءً؟")}
         doctors = list(dict.fromkeys(provider_label(slot, state) for slot in matches))
         question = say(state, "Which doctor would you prefer: ", "عند أي طبيب بتفضّل: ") + "، ".join(doctors) + "؟"
         if len(doctors) == 1:

@@ -12,7 +12,6 @@
 # يستخدم LLM للفهم وMCP للقراءة؛ متابعة الاختيار لا تستدعي أدوات العيادة.
 # ==================================================
 from agent.guardrails import check_guardrails
-from datetime import date
 from time import perf_counter
 from typing import Literal, TypedDict
 
@@ -24,8 +23,12 @@ from agent.intake import extract_request, update_state_from_intake
 from agent.intake import IntakeResult
 from agent.patient_identity import valid_patient_name, normalize_patient_phone, patient_name_noise, spoken_phone_digits
 import re
-from agent.dates import normalize_date
-from agent.times import has_incomplete_arabic_relative_time, normalize_time
+from agent.clinic_inquiry import clinic_inquiry, inquiry_kind
+from agent.dates import UNSPECIFIED_DATE, normalize_date, relative_date_text
+from agent.times import (
+    clocks_within_clinic_hours, has_incomplete_arabic_relative_time, is_appointment_time_change, normalize_time, period_reply,
+    unclear_appointment_time_change,
+)
 from core.contracts import ClinicGateway
 from agent.service_mapping import match_service
 from agent.patient_memory import lookup_returning_patient
@@ -33,11 +36,16 @@ from agent.service_mapping import match_provider
 from agent.scheduler_node import scheduler_node
 from agent.slot_selection import (
     select_slot, extract_time, find_slots_by_id, extract_option_numbers,
-    offered_clock_times, has_ambiguous_compact_time,
+    offered_clock_times, has_ambiguous_compact_time, format_slot_options, BARE_COMPACT_CLOCK,
+    single_option_reference,
 )
-from agent.slot_handoff import slot_matches_offer
+from agent.slot_handoff import (
+    appointment_has_passed, build_find_slots_args, clinic_local_now, scheduling_signature, slot_matches_offer,
+)
+from agent.scheduler import extract_slots, filter_matching_slots, find_available_slots
+from agent.relative_time import active_earlier_reference, search_earlier
 from actions.approval import prepare_booking_action
-from agent.presentation import say
+from agent.presentation import display_time, say
 from agent.service_mapping import service_question
 from agent.slot_selection import has_slot_reference
 # ==================================================
@@ -69,9 +77,22 @@ async def intake_node(state: AgentState) -> AgentState:
 
     # استخراج المعلومات باستخدام LLM
     started = perf_counter()
-    if re.fullmatch(r"\s*(?:hello|hi|hey|مرحبا|مرحباً|اهلا|أهلا|السلام عليكم)[.!؟?،\s]*", message, re.I):
+    if state.get("selected_slot_id") and unclear_appointment_time_change(message):
+        result = IntakeResult(language="ar")
+    elif re.fullmatch(r"\s*(?:hello|hi|hey|مرحبا|مرحباً|اهلا|أهلا|السلام عليكم)[.!؟?،\s]*", message, re.I):
         result = IntakeResult(language=state.get("current_input_language") or ("ar" if re.search(r"[\u0600-\u06ff]", message) else "en"))
-    elif state.get("proposed_slots") and re.fullmatch(r"\s*(?:(?:I want |I choose )?(?:the )?(?:option(?: number)?\s+)?(?:one|two|three|first|second|third|\d{1,2})(?: option| one)?|(?:الخيار|الموعد)\s+(?:الأول|الثاني|الثالث|\d{1,2})|(?:الساعة\s+)?(?:three thirty|three and a half|ثلاثة ونص|3 ونص|\d{1,2}:\d{2}(?:\s*[AP]M)?))\s*[.!؟?]?", message, re.I):
+    elif (state.get("stage") in ("intake", "awaiting_details")
+          and not state.get("service_id") and not state.get("proposed_slots")
+          and (re.fullmatch(r"\s*بدي\s+[أا]حجز[.!؟?،\s]*", message)
+               or (state.get("current_input_language") == "ar"
+                   and re.fullmatch(r"\s*بدي\s+[أا]حرز[.!؟?،\s]*", message)))):
+        # Treat the observed voice variant as booking intent only during service selection.
+        result = IntakeResult(language="ar", intent="booking")
+    elif state.get("proposed_slots") and (
+        BARE_COMPACT_CLOCK.fullmatch(message)
+        or (not state.get("selected_slot_id") and single_option_reference(state, message))
+        or re.fullmatch(r"\s*(?:(?:I want |I choose )?(?:the )?(?:option(?: number)?\s+)?(?:one|two|three|first|second|third|\d{1,2})(?: option| one)?|(?:الخيار|الموعد)\s+(?:الأول|الثاني|الثالث|\d{1,2})|(?:الساعة\s+)?(?:three thirty|three and a half|ثلاثة ونص|3 ونص|\d{1,2}:\d{2}(?:\s*[AP]M)?))\s*[.!؟?]?", message, re.I)
+    ):
         # الاختيار القصير المحدد لا يحتاج اتصال LLM؛ فحص guardrails المستقل يبقى أدناه.
         result = IntakeResult(language=state.get("current_input_language") or ("ar" if re.search(r"[\u0600-\u06ff]", message) else "en" if re.search(r"[a-z]", message, re.I) else state.get("language", "unknown")), intent="booking")
     else:
@@ -80,8 +101,17 @@ async def intake_node(state: AgentState) -> AgentState:
         # لا تُمرر هذه القيمة إلا بعد فحص transcript من لغة التسجيل الصريحة.
         result = result.model_copy(update={"language": state["current_input_language"]})
 
+    if result.intent in ("booking", "other") and active_earlier_reference(state):
+        # A relative-time follow-up keeps the offer that gives the clock its meaning.
+        result = result.model_copy(update={
+            "time_text": None, "date_text": None, "service_text": None,
+            "provider_text": None, "provider_any": False,
+            "patient_name": None, "patient_phone": None,
+        })
+
     # دمج المعلومات الجديدة مع السابقة
     updated_state = update_state_from_intake(state, result)
+    updated_state["inquiry_reply"] = None
     updated_state["intake_ms"] = round((perf_counter() - started) * 1000, 2)
     # ==================================================
     # تذكير — فحص الحماية المستقل
@@ -127,23 +157,45 @@ def normalize_time_node(state: AgentState) -> dict:
     time_text = state.get("time_text") or ""
     preference = normalize_time(time_text)
     message = state.get("current_message", "")
-    if has_ambiguous_compact_time(message) or has_incomplete_arabic_relative_time(message):
+    literal_times = offered_clock_times(message)
+    if literal_times is None and (preference["kind"] in ("ambiguous", "unrecognized")
+                                  or relative_date_text(time_text)):
+        literal_times = offered_clock_times(time_text)
+    outside_hours = False
+    has_range = bool(re.search(r"\b(?:after(?!\s+tomorrow\b)|before)\b|بعد\s+الساعة|قبل\s+الساعة", f"{time_text} {message}", re.I))
+    if (has_ambiguous_compact_time(message) or has_incomplete_arabic_relative_time(message)
+            or (literal_times == [] and not has_range)):
         preference.update(kind="unrecognized", requested_time=None, after=None, before=None)
-    # For a new search, resolve an unspecified period only from known hours for that date.
-    if (preference["kind"] == "ambiguous" and state.get("requested_date")
-            and not re.search(r"[\u0600-\u06ff]|\b(?:after|before)\b", time_text, re.I)):
-        weekday = date.fromisoformat(state["requested_date"]).strftime("%A").lower()
-        hours = ((state.get("clinic_calendar") or {}).get("opening_hours") or {}).get(weekday)
-        candidates = offered_clock_times(time_text) or []
-        if hours and len(candidates) == 2:
-            within_hours = [clock for clock in candidates if hours["open"] <= clock < hours["close"]]
-            if len(within_hours) == 1:
-                preference.update(kind="exact", requested_time=within_hours[0])
+    elif not has_range:
+        # Use the same clock interpretations in both languages, including bare hours.
+        if literal_times and len(literal_times) == 1:
+            preference.update(kind="exact", requested_time=literal_times[0], after=None, before=None)
+        elif literal_times and len(literal_times) == 2:
+            preference.update(kind="ambiguous", requested_time=None, after=None, before=None)
+        if preference["kind"] == "ambiguous":
+            candidates = literal_times or offered_clock_times(time_text) or [
+                clock for period in ("AM", "PM")
+                if (clock := normalize_time(f"{time_text} {period}")["requested_time"])
+            ]
+            if len(candidates) == 2:
+                within_hours = clocks_within_clinic_hours(state, candidates)
+                outside_hours = within_hours == []
+                if outside_hours:
+                    hours = (state.get("clinic_calendar") or {}).get("opening_hours") or {}
+                    # Infer a period only if just one candidate ever falls within regular opening hours.
+                    within_hours = [clock for clock in candidates if any(
+                        window and window["open"] <= clock < window["close"] for window in hours.values()
+                    )]
+                if within_hours and len(within_hours) == 1:
+                    preference.update(kind="exact", requested_time=within_hours[0])
+        if preference["kind"] == "exact" and preference["requested_time"]:
+            outside_hours = clocks_within_clinic_hours(state, [preference["requested_time"]]) == []
     return {
         "time_kind": preference["kind"],
         "requested_time": preference["requested_time"],
         "time_after": preference["after"],
         "time_before": preference["before"],
+        "time_outside_hours": outside_hours,
     }
 
 
@@ -160,7 +212,7 @@ async def normalize_date_node(
     # لا حاجة لاستدعاء العيادة إذا لم يذكر المريض تاريخًا
     date_text = state.get("date_text")
     if not date_text:
-        return {}
+        return {"date_has_passed": False}
 
     # الحصول على Gateway من Runtime Context
     gateway = runtime.context["gateway"]
@@ -196,33 +248,42 @@ async def normalize_date_node(
     if not success:
         return {
             "requested_date": None,
+            "date_has_passed": False,
             "stage": "clinic_unavailable",
             "tool_calls": calls,
         }
 
     # تحويل التاريخ باستخدام الدالة الموجودة في dates.py
+    clinic_now = clinic_local_now(clinic)
+    clinic_today = clinic_now.date().isoformat() if clinic_now else clinic["today"]
     try:
         resolved_date = normalize_date(
             date_text,
-            clinic["today"]
+            clinic_today,
+            allow_past=True,
         )
     except ValueError:
         resolved_date = None
     if resolved_date is None:
         explicit = re.fullmatch(r"(?:يوم\s+)?(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|الاثنين|الثلاثاء|الأربعاء|الخميس|الجمعة|السبت|الأحد)[,،]?\s+(.+)", date_text.strip(), re.I)
-        if explicit and normalize_date(explicit.group(1), clinic["today"]):
+        if explicit and normalize_date(explicit.group(1), clinic_today, allow_past=True):
             # نحفظ العرض والاختيار السابقين أثناء السؤال، لكن لا تبقى موافقة قابلة للتنفيذ.
             prior = state.get("date_clarification_context") or {}
             return {**prior, "requested_date": prior.get("requested_date", state.get("requested_date_change")), "date_conflict": date_text,
-                    "pending_action": None, "tool_calls": calls}
+                    "pending_action": None, "date_has_passed": False, "tool_calls": calls}
 
     # تخزين التاريخ النهائي داخل AgentState
+    past = resolved_date is not None and resolved_date < clinic_today
     return {
-        "requested_date": resolved_date,
-        "clinic_today": clinic["today"],
+        "requested_date": None if past else resolved_date,
+        **({"date_text": resolved_date} if resolved_date and relative_date_text(date_text) else {}),
+        "date_has_passed": past,
+        **({"date_text": None, "pending_action": None, "proposed_slots": [], "selected_slot_id": None,
+            "offer_context": None, "selection_candidates": []} if past else {}),
+        "clinic_today": clinic_today,
         "date_clarification_context": None,
         "provider_catalog": clinic.get("providers", []),
-        "clinic_calendar": {key: clinic.get(key) for key in ("opening_hours", "last_bookable_day", "policies")},
+        "clinic_calendar": {key: clinic.get(key) for key in ("opening_hours", "last_bookable_day", "policies", "now")},
         "tool_calls": calls,
     }
 
@@ -256,10 +317,6 @@ async def service_mapping_node(
 
     # لا نتابع إذا فشل التحقق من تاريخ العيادة.
     if state.get("stage") == "clinic_unavailable":
-        return {}
-
-    # لا نبحث إذا لم يذكر المريض نوع الخدمة.
-    if not state.get("service_text"):
         return {}
 
     # إذا عرفنا الخدمة الرسمية سابقا، نحتفظ بها.
@@ -301,6 +358,8 @@ async def service_mapping_node(
 
     # لا نستعمل قائمة خدمات إذا فشل الاتصال.
     if not success:
+        if not state.get("service_text"):
+            return {"tool_calls": calls}
         return {
             "stage": "services_unavailable",
             "tool_calls": calls,
@@ -308,7 +367,7 @@ async def service_mapping_node(
 
     # مقارنة كلام المريض بالخدمات الرسمية.
     service_id = match_service(
-        state["service_text"],
+        state.get("service_text") or "",
         result["services"]
     )
 
@@ -366,6 +425,11 @@ def route_after_intake(
     if state.get("date_conflict"):
         # لا نعيد تطبيع تاريخ مؤكد أو نستدعي العيادة قبل حسم تعارض اليوم الجديد.
         return "date_conflict"
+    if state.get("intent") in ("booking", "other") and active_earlier_reference(state):
+        return "slot_followup"
+    if (state.get("service_id") and state.get("requested_date")
+            and (state.get("time_change_pending") or is_appointment_time_change(state.get("current_message", "")))):
+        return "slot_followup"
     # نوجّه المتابعة بعد فحوص السلامة، بشرط بقاء المواعيد صالحة.
     if state.get("proposed_slots") and state.get("stage") in (
         "slots_proposed", "awaiting_slot_selection", "slot_selected",
@@ -410,8 +474,8 @@ def slot_followup_node(state: AgentState) -> dict:
         if selected_state.get("patient_phone_invalid") or selected_state.get("patient_phone"):
             phone_question = say(state, "Please provide a valid phone number starting with 0 or +970/+972.", "أعطيني رقم تلفون صحيح يبدأ بصفر أو +970/+972.")
             reason = selected_state.get("phone_error_reason")
-            descriptions = {"length": ("The number has the wrong length; local numbers must have 9 or 10 digits.", "طول الرقم غير صحيح؛ الرقم المحلي لازم يكون 9 أو 10 خانات."),
-                            "prefix": ("The prefix is not accepted; use 0 or +970/+972.", "بداية الرقم غير مقبولة؛ استخدم 0 أو +970/+972."),
+            descriptions = {"length": ("Please repeat or type the full number. Local mobile numbers need 10 digits.", "احكي أو اكتب الرقم كامل. رقم الجوال المحلي لازم يكون 10 خانات."),
+                            "prefix": ("The prefix is unsupported. Please repeat or type the full number.", "بداية الرقم غير مدعومة. احكي أو اكتب الرقم كامل."),
                             "format": ("Please say digits one by one or type the number.", "احكي الأرقام رقم رقم أو اكتب الرقم.")}
             if reason in descriptions:
                 phone_question = say(state, *descriptions[reason])
@@ -449,6 +513,125 @@ def slot_followup_node(state: AgentState) -> dict:
         reply = say(state, "Use Approve to confirm, or Reject to choose another appointment.",
                     "للتأكيد اضغط زر الموافقة، أو الرفض إذا بدك موعد تاني.")
     return {**updates, "stage": "awaiting_approval", "pending_action": pending, "reply": reply}
+
+
+async def appointment_followup_node(state: AgentState, runtime: Runtime[GraphContext]) -> dict:
+    message = state.get("current_message", "")
+    gateway = runtime.context["gateway"]
+    if state.get("selected_slot_id") and unclear_appointment_time_change(message):
+        selected = next((slot for slot in state.get("proposed_slots", [])
+                         if slot["slot_id"] == state["selected_slot_id"]), None)
+        if selected:
+            clock = display_time(selected["start"], "ar")
+            return {"pending_action": None,
+                    "reply": f"موعدك المختار لسه الساعة {clock}. إذا بدك تغيّره، احكي الوقت الجديد بوضوح."}
+    if state.get("intent") in ("booking", "other") and (reference := active_earlier_reference(state)):
+        return await search_earlier(state, gateway, reference)
+    if not (state.get("time_change_pending") or is_appointment_time_change(message)):
+        calendar = state.get("clinic_calendar") or {}
+        if not clinic_local_now(calendar):
+            return slot_followup_node(state)
+        try:
+            clinic = await gateway.call_read("clinic_info", {})
+        except Exception:
+            clinic = {}
+        if not isinstance(clinic, dict) or not clinic.get("ok") or not clinic_local_now(clinic):
+            return {"pending_action": None, "reply": say(state,
+                "I couldn't verify that the appointments are still available. Please try again.",
+                "ما قدرت أتأكد إذا المواعيد لسه متاحة. جرّب مرة تانية، لو سمحت.")}
+        clock_updates = {"clinic_today": clinic.get("today") or state.get("clinic_today"),
+                         "clinic_calendar": {**calendar, "now": clinic["now"]}}
+        refreshed = {**state, **clock_updates}
+        if all(appointment_has_passed(refreshed, slot["date"], slot["start"])
+               for slot in state.get("proposed_slots", [])):
+            return {**clock_updates, "pending_action": None, "selected_slot_id": None, "proposed_slots": [],
+                    "offer_context": None, "selection_candidates": [], "stage": "slot_unavailable",
+                    "reply": say(state, "Those appointments have passed. Which upcoming time works for you?",
+                                 "هالمواعيد مرقت. أي وقت جاي بناسبك؟")}
+        return {**clock_updates, **slot_followup_node(refreshed)}
+
+    # Retain the old choice while suspending its approval during clarification.
+    waiting = {"pending_action": None, "time_change_pending": True, "stage": "awaiting_slot_selection"}
+    cleared = {**waiting, "selected_slot_id": None}
+    if is_appointment_time_change(message):
+        # The clock parser expects the standalone Arabic clock cue.
+        message = re.sub(r"\bل(?:ل)?ساع[ةه](?=\s)", "الساعة", message)
+    times = offered_clock_times(message)
+    period = period_reply(message)
+    if times or is_appointment_time_change(message):
+        waiting["time_change_clocks"] = []
+    if period and state.get("time_change_pending") and not state.get("selection_candidates"):
+        times = [clock for clock in state.get("time_change_clocks", []) if (clock < "12:00") == (period == "AM")]
+        if len(times) == 1:
+            clock = times[0]
+            message = f"{int(clock[:2]) % 12 or 12}:{clock[3:]} {period}"
+    current = {**state, **cleared, "current_message": message,
+               "proposed_slots": [slot for slot in state.get("proposed_slots", [])
+                                                      if slot_matches_offer(state, slot)]}
+    # A bare number during time clarification is ambiguous with an option number.
+    numbered = extract_option_numbers(message)
+    explicit_option = re.search(r"\b(?:option|choice|choose|select|pick)\b|الخيار|خيار|أختار|اختار", message, re.I)
+    followup_reference = has_slot_reference(current, message) and (numbered is None or explicit_option)
+    if times or (times is None and state.get("time_change_pending") and followup_reference):
+        choice = select_slot(current, message)
+        if choice.get("selected_slot_id"):
+            return {**cleared, **slot_followup_node(current), "time_change_pending": False}
+        if choice.get("selection_candidates"):
+            return {**choice, **waiting, "selected_slot_id": state.get("selected_slot_id")}
+    if not times:
+        if times == [] or is_appointment_time_change(message):
+            waiting.update(time_change_clocks=[], selection_candidates=[])
+        return {**waiting, "reply": say(state, "Please repeat the exact hour and minute.",
+                                         "ممكن تعيد الساعة والدقيقة بالضبط؟")}
+
+    # Search exact interpretations only, using the clinic's hours for this date.
+    slots = {}
+    try:
+        clinic = await gateway.call_read("clinic_info", {})
+        if not clinic.get("ok"):
+            raise ValueError("Clinic information unavailable")
+        within_hours = clocks_within_clinic_hours({**state, "clinic_calendar": clinic}, times)
+        if within_hours is None and len(times) > 1:
+            return {**waiting, "time_change_clocks": times, "selection_candidates": [],
+                    "reply": say(state, "Did you mean morning or afternoon?",
+                                             "قصدك صباحًا ولا مساءً؟")}
+        if within_hours == []:
+            return {**waiting, "reply": say(state, "That time is outside clinic opening hours.",
+                                             "هالساعة خارج دوام العيادة.")}
+        candidates = within_hours if within_hours is not None else times
+        current_calendar = {**state, "clinic_today": clinic.get("today") or state.get("clinic_today"),
+                            "clinic_calendar": clinic}
+        future_times = [clock for clock in candidates
+                        if not appointment_has_passed(current_calendar, state["requested_date"], clock)]
+        if not future_times:
+            return {**waiting, "reply": say(state, "That time has passed. Please choose a later appointment.",
+                                             "هالساعة مرقت. اختار موعد بعد هالوقت، لو سمحت.")}
+        for clock in future_times:
+            search = {**current_calendar, "stage": "needs_slot_lookup", "time_kind": "exact", "requested_time": clock}
+            result = await find_available_slots(gateway, build_find_slots_args(search, limit=50))
+            for slot in filter_matching_slots(search, extract_slots(result)):
+                slots[slot["slot_id"]] = slot
+    except Exception:
+        return {**waiting, "reply": say(state, "I couldn't verify the new time. Please try again.",
+                                         "ما قدرت أتحقق من الساعة الجديدة. جرّب مرة تانية، لو سمحت.")}
+
+    if not slots:
+        return {**waiting, "reply": say(state, "No appointment is available at that time. Please choose another time.",
+                                         "ما في موعد متاح بهالساعة. اختار ساعة تانية، لو سمحت.")}
+
+    # Keep the search signature and expose only slots verified in the exact lookups.
+    offers = {"proposed_slots": list(slots.values()), "offer_context": {
+        "request": scheduling_signature(state),
+        "search": {**scheduling_signature(state), "time_kind": "missing", "requested_time": None},
+        "slot_ids": list(slots),
+    }}
+    verified = {**state, **cleared, **offers, "current_message": message}
+    followup = slot_followup_node(verified)
+    if followup.get("stage") == "awaiting_slot_selection":
+        followup["reply"] = format_slot_options(offers["proposed_slots"], state) + "\n" + followup["reply"]
+        followup["selected_slot_id"] = state.get("selected_slot_id")
+    return {**waiting, **offers, **followup, "time_change_pending": not bool(followup.get("selected_slot_id")
+                                                                              and followup.get("stage") != "awaiting_slot_selection")}
 
 # ==================================================
 # تذكير — safety_node
@@ -619,9 +802,7 @@ async def patient_lookup_node(
     # إذا كان المريض معروفا نستفيد من بياناته.
     if result["status"] == "found":
 
-        # لا نستبدل اسما قدمه المستخدم بنفسه.
-        if not state.get("patient_name") and valid_patient_name(result.get("name")) and not state.get("patient_is_other"):
-            updates["patient_name"] = result["name"]
+        # A phone lookup can suggest a provider but cannot establish the patient's name.
 
         # ==========================================
         # التعديل الجديد: فصل تفضيل الطبيب عن الحجز.
@@ -817,6 +998,9 @@ def choose_next(
     ):
         return "clinic_error"
 
+    if state.get("date_has_passed"):
+        return "clarify"
+
     # 3. المريض طلب طبيبا، لكننا لم نتمكن
     # من التحقق من اسمه أو ملاءمته للخدمة.
     if state.get("stage") == "provider_unverified":
@@ -838,6 +1022,10 @@ def choose_next(
 def clarify_node(state: AgentState) -> dict:
 
     is_arabic = state.get("language") == "ar"
+    if state.get("date_has_passed"):
+        return {"stage": "awaiting_details", "reply": say(state,
+            "That date has passed. Which upcoming day works for you?",
+            "هالتاريخ مرق. أي يوم جاي بناسبك؟")}
     if state.get("date_conflict"):
         if not state.get("requested_date"):
             return {"stage": "awaiting_details", "reply": say(state,
@@ -847,13 +1035,7 @@ def clarify_node(state: AgentState) -> dict:
             f"You previously requested {state.get('requested_date')}, which conflicts with {state['date_conflict']}. Please confirm the full date you want.",
             f"طلبك السابق ليوم {state.get('requested_date')} مختلف عن {state['date_conflict']}. ممكن تأكد التاريخ الكامل المطلوب؟")}
 
-    if not state.get("service_text"):
-        reply = (
-            "ما نوع الموعد الذي ترغب بحجزه؟"
-            if is_arabic
-            else "What type of appointment would you like?"
-        )
-    elif not state.get("service_id"):
+    if not state.get("service_id") and state.get("date_text") != UNSPECIFIED_DATE:
         reply = service_question(state)
     elif not state.get("requested_date"):
         reply = (
@@ -977,7 +1159,7 @@ def build_graph():
     # ==============================================
 
     builder.add_node("intake", intake_node)
-    builder.add_node("slot_followup", slot_followup_node)
+    builder.add_node("slot_followup", appointment_followup_node)
 
     builder.add_node("patient_lookup", patient_lookup_node)
 
@@ -1008,7 +1190,9 @@ def build_graph():
     # ==============================================
 
     # كل رسالة تبدأ من Intake.
-    builder.add_edge(START, "intake")
+    builder.add_node("clinic_inquiry", clinic_inquiry)
+    builder.add_conditional_edges(START, inquiry_kind, {"intake": "intake", "hours": "clinic_inquiry", "availability": "clinic_inquiry", "earliest": "clinic_inquiry"})
+    builder.add_edge("clinic_inquiry", END)
 
     # ==============================================
     # ثالثاً: توجيه الرسالة بعد Intake

@@ -42,7 +42,6 @@ async def lookup_returning_patient(
     if response.get("ok") is True:
         return {
             "status": "found",
-            "name": response.get("name"),
             "preferred_provider_id": response.get(
                 "preferred_provider_id"
             ),

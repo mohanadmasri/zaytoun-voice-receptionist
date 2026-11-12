@@ -17,6 +17,7 @@ from core.contracts import PendingAction, ToolCall
 
 # يحدد شكل الحالة المشتركة التي تنتقل بين خطوات LangGraph.
 class AgentState(TypedDict, total=False):
+    inquiry_reply: str | None
     requires_guardian: bool
     guardian_name: str | None
     patient_age: int | None
@@ -27,6 +28,7 @@ class AgentState(TypedDict, total=False):
     patient_age_unverified: bool
     patient_is_other: bool
     date_conflict: str | None
+    date_has_passed: bool
     date_clarification_context: dict | None
     requested_date_change: str | None
     intake_ms: float
@@ -132,7 +134,11 @@ class AgentState(TypedDict, total=False):
     # المواعيد المتاحة والحجز الذي ينتظر الموافقة
     proposed_slots: list[dict[str, Any]]
     selected_slot_id: str | None
+    time_change_pending: bool
+    time_change_clocks: list[str]
+    time_outside_hours: bool
     pending_action: PendingAction | None
+    session_appointments: list[dict[str, Any]]
 
     # سجل المحادثة والرد واستدعاءات الأدوات
     messages: list[dict[str, str]]
@@ -194,6 +200,7 @@ def create_initial_state(session_id: str) -> AgentState:
         "proposed_slots": [],
         "selected_slot_id": None,
         "pending_action": None,
+        "session_appointments": [],
 
         # المحادثة تبدأ دون رسائل أو نتائج أدوات
         "messages": [],

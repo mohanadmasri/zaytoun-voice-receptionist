@@ -88,14 +88,24 @@ def dental_aliases(text: str, services: list[dict]) -> set[str]:
 def service_question(state: dict) -> str:
     from agent.presentation import say
     text = normalize_service_name(state.get("service_text") or "")
-    options = [s for s in state.get("service_catalog", [])
-               if str(s.get("id", "")).startswith("dental_")]
-    if re.search(r"اسنان|\bdentist\b|\bdental\b", text) and options:
-        names = [s.get("name_ar") if state.get("language") == "ar" else s.get("name_en") for s in options]
-        names = [name for name in names if name]
+    dental = bool(re.search(r"اسنان|\bdentist\b|\bdental\b", text))
+    if not text or dental:
+        name_key = "name_ar" if state.get("language") == "ar" else "name_en"
+        names = list(dict.fromkeys(
+            service[name_key] for service in state.get("service_catalog", [])
+            if isinstance(service, dict) and service.get(name_key)
+            and (not dental or str(service.get("id", "")).startswith("dental_"))
+        ))
         if names:
-            return say(state, "Would you like " + ", ".join(names) + "?",
-                       "بدك " + "، أو ".join(names) + "؟")
+            english = ", ".join(names[:3])
+            arabic = "، أو ".join(names[:3])
+            if dental and len(names) <= 3:
+                return say(state, f"Would you like {english}?", f"بدك {arabic}؟")
+            if dental:
+                return say(state, f"Would you like {english}, or another dental service?",
+                           f"بدك {arabic}، أو خدمة أسنان ثانية؟")
+            return say(state, f"Welcome to Zaytoun Family Clinic! Would you like {english}, or another service?",
+                       f"أهلًا وسهلًا بعيادة الزيتون! بدك تحجز {arabic}، أو خدمة ثانية؟")
     return say(state, "What type of appointment would you like?", "شو نوع الموعد اللي بدك إياه؟")
 
 

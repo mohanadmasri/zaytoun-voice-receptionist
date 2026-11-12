@@ -27,6 +27,9 @@ def make_slot(slot_id, start, provider="dr_khoury", date="2026-11-03"):
 # قائمة غير مرتبة زمنيًا عمدًا؛ الترقيم يجب أن يحافظ على ترتيب نتيجة التصفية.
 SLOTS = [make_slot("SL-A", "16:00"), make_slot("SL-B", "15:45"),
          make_slot("SL-C", "15:45", "dr_nassar")]
+COMPACT_TIME_OFFERS = [make_slot("SL-SAMI", "14:15", "dr_nassar"),
+                       make_slot("SL-RANIA-LATE", "16:30"),
+                       make_slot("SL-RANIA-EARLY", "13:15")]
 
 
 # تبني حالة صالحة للاختبارات المباشرة دون لمس SessionStore.
@@ -40,6 +43,51 @@ def selection_state():
 
 # تفحص تحليل الأرقام وتقاطع الرقم والمعرف والوقت وحدود القائمة دون أي أدوات.
 class NumberedSelectionTests(unittest.TestCase):
+    def test_compact_clock_matches_only_displayed_offers(self):
+        state = selection_state()
+        state.update(time_kind="missing", time_after=None, proposed_slots=list(COMPACT_TIME_OFFERS))
+        for message, expected in (
+            ("115", "SL-RANIA-EARLY"), ("430", "SL-RANIA-LATE"),
+            ("1", "SL-SAMI"), ("option 3", "SL-RANIA-EARLY"),
+            ("one fifteen", "SL-RANIA-EARLY"), ("four thirty", "SL-RANIA-LATE"),
+        ):
+            with self.subTest(message=message):
+                self.assertEqual(select_slot(state, message)["selected_slot_id"], expected)
+
+        # A real 1:50 offer must not make the previously rejected phrase valid.
+        state["proposed_slots"].append(make_slot("SL-FIFTY", "13:50"))
+        for message in ("at 150", "345", "option 115", "+115", "0115", "175", "000", "1.15"):
+            with self.subTest(message=message):
+                result = select_slot(state, message)
+                self.assertIsNone(result["selected_slot_id"])
+                self.assertEqual(result["stage"], "awaiting_slot_selection")
+
+        state["proposed_slots"].append(make_slot("SL-SAMI-EARLY", "13:15", "dr_nassar"))
+        result = select_slot(state, "115")
+        self.assertIsNone(result["selected_slot_id"])
+        self.assertEqual(result["selection_candidates"], ["SL-RANIA-EARLY", "SL-SAMI-EARLY"])
+
+    def test_bare_hours_resolve_from_actual_date_specific_hours(self):
+        from agent.graph import normalize_time_node
+
+        state = {"requested_date": "2026-11-10", "clinic_calendar": {"opening_hours": {
+            "tuesday": {"open": "09:00", "close": "19:00"},
+        }}}
+        for phrase in ("at three", "at 3", "الساعة ثلاثة", "الساعة ٣"):
+            with self.subTest(phrase=phrase):
+                result = normalize_time_node({**state, "time_text": phrase})
+                self.assertEqual((result["time_kind"], result["requested_time"]), ("exact", "15:00"))
+        for calendar in ({}, {"opening_hours": {"tuesday": {"open": "00:00", "close": "19:00"}}}):
+            with self.subTest(calendar=calendar):
+                result = normalize_time_node({**state, "time_text": "at three", "clinic_calendar": calendar})
+                self.assertEqual(result["time_kind"], "ambiguous")
+                guessed = normalize_time_node({**state, "time_text": "3 PM", "current_message": "at three",
+                                               "clinic_calendar": calendar})
+                self.assertEqual(guessed["time_kind"], "ambiguous")
+        explicit = normalize_time_node({**state, "time_text": "15:00", "current_message": "at 3 AM"})
+        self.assertEqual(explicit["requested_time"], "03:00")
+        self.assertTrue(explicit["time_outside_hours"])
+
     def test_arabic_quarter_to_does_not_fall_back_to_the_hour(self):
         state = selection_state()
         state.update(language="ar", time_kind="missing", time_after=None, proposed_slots=[

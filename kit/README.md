@@ -4,7 +4,9 @@
 
 Simulated systems for the Voice Receptionist mini-project of the Agentic AI Bootcamp.
 
-The clinic is **fictional**. Every patient, provider, phone number and booking here is simulated.
+The clinic is **fictional**. Use only synthetic patient details when running the demo.
+For the complete receptionist, use the [project setup and launcher](../README.md#run-locally-on-windows).
+The Compose file defines the clinic simulator and the receptionist app. FastAPI serves the main receptionist UI with streamed Callirrhoe speech.
 The kit gives you the clinic's system of record (a REST API), an MCP server in front of it,
 voice adapters (speech-to-text and text-to-speech), sample recordings, a small UI and an eval runner.
 You build the receptionist agent and its API (`/api/chat`, `/api/approve`, `/api/voice`, see the
@@ -17,10 +19,10 @@ mini-project's `CONTRACT.md`).
 | `services/clinic_api.py` | The clinic's system of record: FastAPI on port 8101, in-memory, seeded at start-up |
 | `services/clinic_mcp.py` | MCP server (stdio) that wraps the API: 8 tools |
 | `services/data/` | Seed data: clinic, services, providers, returning patients, calendar rules |
-| `services/Dockerfile`, `docker-compose.yml` | Run the clinic API in Docker |
+| `Dockerfile`, `services/Dockerfile`, `docker-compose.yml` | Build and run the receptionist and clinic simulator |
 | `voice/stt.py`, `voice/tts.py` | `transcribe(audio)` and `speak(text)` with switchable providers |
 | `samples/audio/` | 8 short synthetic requests (English and Arabic), see its README |
-| `ui/app_ui.py` | Gradio client of the contract: microphone, chat, Approve/Reject, spoken replies |
+| `ui/web/`, `ui/app_ui.py` | Main FastAPI browser UI and legacy Gradio client |
 | `evals/cases.sample.jsonl`, `evals/run_evals.py` | 10 sample test cases and the shared eval runner |
 | `check_kit.py` | Smoke test: prints ✅ lines and ends with "✅ Kit ready." |
 | `requirements.txt` | Pinned versions tested together (Python 3.12), aligned with the course's Module 2 venv, plus the agent framework (`langgraph`, `openai`): one venv for the kit and your agent |
@@ -270,28 +272,30 @@ audio = speak("Your appointment is booked.")    # (wav_bytes, "audio/wav") or No
 The Gradio microphone sends **WAV** (Gradio encodes the recording in the browser), so no ffmpeg is
 needed. If you build another UI, record WAV, or convert WebM/Ogg before calling `transcribe`.
 
-**Text-to-speech** (`TTS_PROVIDER`)
+**Clinic web text-to-speech**
+
+OpenRouter streams public Arabic and English replies with `google/gemini-3.8-flash-lite-tts`
+and voice `Callirrhoe`. Replies containing patient details remain written-only. If audio
+fails, the written reply stays visible and its play button retries Gemini.
+
+**Standalone speech utility** (`TTS_PROVIDER`)
 
 | Provider | How | Notes |
 |---|---|---|
 | `piper` (default) | Offline neural voices, chosen by the reply's script: Arabic letters use the Arabic voice | First use downloads the voice into `voice/models/` (git-ignored). Loading takes about 5 s once; then about 0.2-0.6 s per sentence on a laptop CPU |
-| `browser` | `speak()` returns `None`; the UI speaks the reply with the browser's `speechSynthesis` | No download, voice quality depends on the browser |
+| `browser` | Legacy setting that disables audio from the standalone `speak()` utility | No model download |
 
 | Piper voice | Use | File (Hugging Face `rhasspy/piper-voices`, tag v1.0.0) | What its model card says |
 |---|---|---|---|
 | `en_US-ljspeech-medium` | **English, default** | https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/ljspeech/medium/en_US-ljspeech-medium.onnx (+ `.onnx.json`), 64 MB | Dataset LJ Speech, **licence: public domain**; trained from scratch. Safe for a published demo |
-| `ar_JO-kareem-medium` | Arabic, default (the only `ar_JO` voice) | https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/ar/ar_JO/kareem/medium/ar_JO-kareem-medium.onnx (+ `.onnx.json`), 63 MB | Dataset https://github.com/AliMokhammad/arabicttstrain, **"License: See URL"**, and that repository states no licence; the voice was fine-tuned from the lessac voice below. So its licence is unclear: fine for a course demo, but if you publish recordings or a hosted demo, prefer `TTS_PROVIDER=browser` for Arabic |
+| `ar_JO-kareem-medium` | Arabic, default (the only `ar_JO` voice) | https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/ar/ar_JO/kareem/medium/ar_JO-kareem-medium.onnx (+ `.onnx.json`), 63 MB | Dataset https://github.com/AliMokhammad/arabicttstrain, **"License: See URL"**, and that repository states no licence; the voice was fine-tuned from the lessac voice below. So its licence is unclear: fine for a course demo, but if you publish recordings or a hosted demo, use the clinic web interface for Arabic |
 | `en_US-lessac-medium` | English, optional (`PIPER_VOICE_EN=en_US-lessac-medium`) | https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx (+ `.onnx.json`), 63 MB | Dataset Blizzard 2013 Lessac, **research-only licence** (no commercial use). Do not use it in your published demo |
 
 The downloader checks the SHA-256 of every voice model above. The `piper-tts` package itself is GPL-3.0.
 Model cards: `MODEL_CARD` next to each voice in the repository. With Piper, Arabic names such as
-"Khoury" come out approximate in the English voice; the browser voice has the same limit.
+"Khoury" come out approximate in the English voice.
 
-Not used here: OpenRouter text-to-speech (blocked on accounts with zero data retention) and
-`edge-tts` (its unofficial endpoint now answers 403). Alternative if you want cloud voices:
-**Azure AI Speech** has a free tier (F0, about 0.5 million characters of neural text-to-speech and
-5 audio hours of speech-to-text per month; check the current pricing page) with Arabic voices
-such as `ar-JO-SanaNeural`. That would be your own adapter in `voice/`.
+
 
 A `/api/voice` sketch for your app (`transcribe` and `speak` block, so run them in a thread):
 

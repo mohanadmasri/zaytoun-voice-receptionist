@@ -209,7 +209,10 @@ class ArabicGraphTests(unittest.IsolatedAsyncioTestCase):
             fields = dict(language="ar", intent="booking", service_text="فحص أسنان",
                           date_text="2 نوفمبر 2026", time_text="بعد الساعة 3 العصر", provider_any=True)
             fields.update(changes)
-            data = await self.send(self.new_session(), ARABIC_TRANSCRIPT, IntakeResult(**fields))
+            message = ARABIC_TRANSCRIPT
+            if "date_text" in changes:
+                message = message.replace("الاثنين 2 نوفمبر 2026", changes["date_text"])
+            data = await self.send(self.new_session(), message, IntakeResult(**fields))
             self.assertEqual(data["state"], stage, changes)
             self.assertFalse(any(name == "find_slots" for name, _ in self.gateway.reads))
             self.assertIsNone(data.get("pending_action"))

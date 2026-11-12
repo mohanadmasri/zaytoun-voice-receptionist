@@ -1,14 +1,11 @@
 # انحدار المحادثة العربية والاختيار الطبيعي والعرض دون معرفات داخلية.
 # يستخدم HTTP وGraph الحقيقيين مع بدائل LLM وSTT وMCP، وكل كتابة حجز ممنوعة.
-# فحص JavaScript يحاكي إعدادات speechSynthesis فقط؛ لا يثبت سماع صوت في متصفح حقيقي.
 import json
 import re
-import shutil
-import subprocess
 import unittest
 from copy import deepcopy
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import httpx
@@ -22,7 +19,6 @@ from agent.state import create_initial_state
 from agent.slot_selection import select_slot, extract_option_numbers
 from core.session_store import session_store
 from test_voice_api import wav_bytes
-from test_voice_ui import app_ui
 from test_support import confirm_phone_turn
 
 DATA = Path(__file__).parent / "services/data"
@@ -165,6 +161,27 @@ class ArabicConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.state()["requested_date"], "2026-11-02")
         self.assertEqual(len(self.state()["proposed_slots"]), 1)
 
+    async def test_arabic_opening_and_service_choice(self):
+        for message in ("مرحبا", "بدي أحجز"):
+            data = await self.send(message)
+            for service in SERVICES[:3]:
+                self.assertEqual(data["reply"].count(service["name_ar"]), 1)
+            self.assertIsNone(self.state()["service_id"])
+        data = await self.send("أسنان", service_text="أسنان")
+        self.assertIn("حشوة أسنان", data["reply"])
+        data = await self.send("حشوة أسنان")
+        self.assertIn("أي يوم", data["reply"])
+        self.assertEqual(self.state()["service_id"], "dental_filling")
+
+    async def test_english_opening_and_service_choice(self):
+        data = await self.send("I'd like to book", language="en")
+        self.assertIn("Welcome", data["reply"])
+        for service in SERVICES[:3]:
+            self.assertEqual(data["reply"].count(service["name_en"]), 1)
+        data = await self.send("Dental filling", language="en")
+        self.assertIn("Which day", data["reply"])
+        self.assertEqual(self.state()["service_id"], "dental_filling")
+
     async def test_generic_dentist_without_date_asks_service_first(self):
         for phrase in ("بدي موعد عند دكتور أسنان", "بدي أحجز عند طبيب الأسنان"):
             data = await self.send(phrase, service_text=phrase)
@@ -259,6 +276,34 @@ class ArabicConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["state"], "emergency")
         self.assertIsNone(data.get("pending_action"))
 
+    async def test_opening_voice_intent_preserves_transcript_and_stays_narrow(self):
+        for index, (phrase, local_intent) in enumerate((
+            ("بدي أحرز", True),
+            ("بدي أحجز", True),
+            ("بدي أحرز هدف", False),
+            ("بدي أعمل شي", False),
+        )):
+            with self.subTest(phrase=phrase):
+                extractor = AsyncMock(return_value=IntakeResult(language="ar", intent="off_topic"))
+                with patch("integrations.voice_adapter.transcribe", return_value=phrase), \
+                     patch("integrations.voice_adapter.speak", return_value=None), \
+                     patch("agent.graph.extract_request", extractor):
+                    response = await self.client.post(
+                        "/api/voice", data={"session_id": self.session_id, "language_hint": "ar"},
+                        files={"audio": ("ar.wav", wav_bytes() + bytes([index]) * 2, "audio/wav")},
+                    )
+                self.assertEqual(response.status_code, 200, response.text)
+                data = response.json()
+                self.assertEqual(data["transcript"], phrase)
+                self.assertEqual(self.state()["current_message"], phrase)
+                self.assertIsNone(self.state()["service_id"])
+                if local_intent:
+                    extractor.assert_not_awaited()
+                    self.assertIn("حشوة أسنان", data["reply"])
+                else:
+                    extractor.assert_awaited_once_with(phrase)
+                    self.assertEqual(self.state()["intent"], "off_topic")
+
     async def test_voice_and_language_hint(self):
         async def fake_extract(message):
             return IntakeResult(language="ar", intent="booking", service_text="فحص اسنان", date_text="2 نوفمبر 2026",
@@ -273,33 +318,13 @@ class ArabicConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["transcript"], TRANSCRIPT)
         self.assertEqual(data["language"], "ar")
         self.assertNotIn("SL-", data["reply"])
-        speech = json.loads(app_ui.show(data, [])[8])
-        self.assertEqual(speech["language"], "ar")
 
 
-# ينفذ JavaScript الخاص بالواجهة داخل Node مع speechSynthesis وهمي، وليس سماعات حقيقية.
 class BrowserSpeechConfigurationTests(unittest.TestCase):
-    @unittest.skipUnless(shutil.which("node"), "Node is not installed")
-    def test_language_voice_selection_and_no_voice_fallback(self):
-        script = """
-        const spoken=[];
-        global.SpeechSynthesisUtterance=class {constructor(text){this.text=text;}};
-        global.speechSynthesis={cancel(){},getVoices(){return [{lang:'ar-JO'},{lang:'en-GB'}]},speak(u){spoken.push(u.lang)},
-          addEventListener(){},removeEventListener(){}};
-        global.window={speechSynthesis};
-        const speak=REPLACE_FUNCTION;
-        (async()=>{
-          await speak(JSON.stringify({text:'موعدك متاح',language:'ar'}));
-          await speak(JSON.stringify({text:'Your appointment with رانيا',language:'en'}));
-          speechSynthesis.getVoices=()=>[];
-          global.setTimeout=(fn)=>{fn()};
-          await speak(JSON.stringify({text:'مرحبا',language:'ar'}));
-          console.log(JSON.stringify(spoken));
-        })();
-        """.replace("REPLACE_FUNCTION", app_ui.SPEAK_JS)
-        result = subprocess.run([shutil.which("node"), "-e", script], text=True, capture_output=True, timeout=10)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout), ["ar-JO", "en-GB", "ar-PS"])
+    def test_web_interfaces_have_no_browser_speech_synthesis(self):
+        ui = Path(__file__).parent / "ui"
+        for path in [ui / "app_ui.py", *(ui / "web").glob("*.js")]:
+            self.assertNotIn("speechSynthesis", path.read_text(encoding="utf-8"), str(path))
 
 
 if __name__ == "__main__":

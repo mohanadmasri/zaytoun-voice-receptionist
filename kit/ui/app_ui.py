@@ -1,5 +1,5 @@
 # واجهة Gradio الموجودة لعرض المحادثة والتسجيل والنص والخيارات وحالة الموافقة.
-# المدخل نص أو تسجيل ميكروفون WAV؛ المخرج رد API مع transcript وتشغيل صوت المتصفح.
+# المدخل نص أو تسجيل ميكروفون WAV؛ المخرج رد API مع transcript ونص الرد.
 # لا تتصل مباشرة بـLLM أو MCP؛ ترسل إلى FastAPI، وتنفذ الموافقة بزر مستقل فقط.
 """Gradio client for the receptionist API contract: POST /api/chat, /api/voice and /api/approve.
 
@@ -7,11 +7,10 @@ Start your app first (APP_URL, default http://localhost:8000), then:
     python ui/app_ui.py        ->  http://localhost:7860
 
 Speak (record or upload) or type. When your app proposes a booking (pending_action), Approve or
-Reject it. Replies are spoken: the app's audio_b64 when present, otherwise the browser's own voice.
+Reject it. Spoken replies are available in the main clinic interface.
 """
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 
@@ -27,42 +26,6 @@ except ImportError:
 
 APP_URL = (os.getenv("APP_URL") or "http://localhost:8000").rstrip("/")
 TIMEOUT = float(os.getenv("UI_TIMEOUT") or 120)
-
-# Runs in the browser after every reply: play the app's audio, or speak the text with speechSynthesis.
-SPEAK_JS = """async (speech, enabled = true) => {
-  if (!speech) return;
-  const s = JSON.parse(speech);
-  const status = typeof document !== "undefined" ? document.getElementById("audio-status") : null;
-  const report = (text) => { if (status) status.textContent = text; };
-  if (typeof document !== "undefined") document.querySelectorAll("#conversation .message p").forEach((p) => p.setAttribute("dir", "auto"));
-  const request = window.zaytounSpeechRequest = (window.zaytounSpeechRequest || 0) + 1;
-  window.speechSynthesis && speechSynthesis.cancel();
-  if (!enabled) { report("Playback off / النطق متوقف"); return; }
-  if (s.audio) { new Audio(s.audio).play().catch(() => report("Playback blocked. Press Replay / اضغط إعادة سماع الرد")); return; }
-  if (!s.text || !window.speechSynthesis) return;
-  const u = new SpeechSynthesisUtterance(s.text);
-  const ttsStarted = performance.now();
-  u.onstart = () => { window.zaytounTtsMetrics = {start_ms: performance.now() - ttsStarted}; report("Speaking / جارٍ النطق"); };
-  u.onend = () => { window.zaytounTtsMetrics = {...window.zaytounTtsMetrics, total_ms: performance.now() - ttsStarted}; report(""); };
-  u.onerror = () => report("Voice unavailable. Try Replay / جرّب إعادة سماع الرد");
-  const language = s.language === "ar" || s.language === "en" ? s.language
-    : (/[\\u0600-\\u06FF]/.test(s.text) ? "ar" : "en");
-  let voices = speechSynthesis.getVoices();
-  if (!voices.length) {
-    await new Promise((resolve) => {
-      const finish = () => { speechSynthesis.removeEventListener("voiceschanged", finish); resolve(); };
-      speechSynthesis.addEventListener("voiceschanged", finish);
-      setTimeout(finish, 800);
-    });
-    voices = speechSynthesis.getVoices();
-  }
-  const v = voices.find((x) => x.lang.toLowerCase().startsWith(language));
-  if (request !== window.zaytounSpeechRequest) return;
-  u.lang = v ? v.lang : (language === "ar" ? "ar-PS" : "en-US");
-  if (v) u.voice = v;
-  window.zaytounUtterance = u;
-  speechSynthesis.speak(u);
-}"""
 
 
 # ترسل الطلب إلى FastAPI وتحتفظ برد الأخطاء الصوتية المنظم والموافقة الموجودة فيه.
@@ -88,31 +51,14 @@ def session_id(request: gr.Request) -> str:
 
 
 # تحول رد العقد إلى حقول الواجهة، وتحافظ على الخيارات المرقمة داخل reply كما وردت.
-# حقول الصوت الفارغة تطلب نطق المتصفح؛ زر Replay يسمح بتشغيله بتفاعل المستخدم.
 def show(data: dict, history: list) -> tuple:
     """Map one ChatResponse onto the UI components."""
     history = history + [{"role": "assistant", "content": data.get("reply") or "(empty reply)"}]
     pending = data.get("pending_action")
-    calls = data.get("tool_calls") or []
-    tools_md = "\n".join(f"- `{c.get('tool')}` {'ok' if c.get('ok') else '**failed**'} ({c.get('ms', '?')} ms)"
-                         for c in calls) or "_none_"
-    if data.get("timings"):
-        tools_md += "\n\nTiming (ms): `" + json.dumps(data["timings"]) + "`"
-    status = f"**State:** {data.get('state') or '-'}"
-    if data.get("session_reset"):
-        status += "\n**Session restarted / أُعيد بدء الجلسة**"
-    if data.get("result"):
-        booking_id = data["result"].get("booking_id")
-        if booking_id:
-            status += f"  \n**Booking reference:** `{booking_id}`"
-    if (data.get("usage") or {}).get("cost_usd") is not None:
-        status += f"  \n**Cost of this turn:** ${float(data['usage']['cost_usd']):.4f}"
     pending_heading = "بتوافق على هالموعد؟" if data.get("language") == "ar" else "Approve this?"
     pending_md = f"### {pending_heading}\n{pending.get('summary', '')}" if pending else ""
-    audio = f"data:{data.get('audio_mime') or 'audio/wav'};base64,{data['audio_b64']}" if data.get("audio_b64") else None
-    speech = json.dumps({"text": data.get("reply") or "", "audio": audio, "language": data.get("language")})
-    return (history, data.get("transcript") or "", status, tools_md, pending_md, pending,
-            gr.update(visible=bool(pending)), gr.update(visible=bool(pending)), speech)
+    return (history, data.get("transcript") or "", pending_md, pending,
+            gr.update(visible=bool(pending)), gr.update(visible=bool(pending)))
 
 
 # ترسل نصًا عبر /api/chat بنفس جلسة الميكروفون، ليبقى الإدخال الكتابي بديلًا دائمًا.
@@ -133,8 +79,9 @@ def send_voice(audio_path: str | None, history: list, request: gr.Request, langu
         data = post("/api/voice", data={"session_id": session_id(request), "language_hint": "en" if language == "English" else "ar",
                                        "continuation": str(bool(history)).lower()},
                     files={"audio": (Path(audio_path).name, fh, "audio/wav")})
-    heard = data.get("transcript") or "(nothing heard)"
-    return show(data, history + [{"role": "user", "content": f"(voice preview) {heard}"}]) + (data.get("transcript_token"),)
+    if heard := data.get("transcript"):
+        history = history + [{"role": "user", "content": f"(voice preview) {heard}"}]
+    return show(data, history) + (data.get("transcript_token"),)
 
 
 # تأكيد النص المراجع فقط؛ لا علاقة له بزر موافقة الحجز، ولا يعيد رفع الملف الصوتي.
@@ -210,7 +157,6 @@ with gr.Blocks(title="Zaytoun Family Clinic — AI Voice Receptionist") as demo:
         refresh = gr.Button("Refresh connection / تحديث الاتصال", size="sm", scale=1)
     pending_state = gr.State(None)
     voice_token = gr.State(None)
-    speech = gr.Textbox(visible=False)
     with gr.Row(equal_height=False):
         with gr.Column(scale=7, min_width=300, elem_classes="clinic-card"):
             gr.Markdown("### Your conversation · محادثتك")
@@ -221,10 +167,7 @@ with gr.Blocks(title="Zaytoun Family Clinic — AI Voice Receptionist") as demo:
             gr.Markdown("Record, then stop — we will listen and reply. / سجّل وأوقف التسجيل؛ المساعد بيسمع وبيرد.")
             recording_language = gr.Radio(["العربية", "English"], value="العربية", label="Recording language / لغة التسجيل")
             mic = gr.Audio(sources=["microphone", "upload"], type="filepath", format="wav", label="Microphone / الميكروفون")
-            autoplay = gr.Checkbox(value=True, label="Speak replies automatically / قراءة الرد تلقائيًا")
-            replay = gr.Button("Replay reply / إعادة سماع الرد")
-            gr.HTML('<p id="audio-status" role="status" aria-live="polite"></p>')
-            gr.Markdown("You can correct anything we heard by typing. Playback depends on your browser's voices and permissions. / صحح أي تفريغ بالكتابة. النطق حسب أصوات المتصفح وصلاحياته.", elem_id="privacy-note")
+            gr.Markdown("You can correct anything we heard by typing. / صحح أي تفريغ بالكتابة.", elem_id="privacy-note")
         with gr.Column(scale=4, min_width=280, elem_classes="clinic-card"):
             gr.Markdown("### Review your appointment · راجع موعدك")
             pending_md = gr.Markdown("Your appointment summary appears here before any booking. / ملخص الموعد بيظهر هون قبل أي حجز.", elem_id="approval-card")
@@ -232,22 +175,18 @@ with gr.Blocks(title="Zaytoun Family Clinic — AI Voice Receptionist") as demo:
                 approve_btn = gr.Button("Approve appointment / تأكيد الموعد", variant="primary", visible=False)
                 reject_btn = gr.Button("Reject / رفض", variant="stop", visible=False)
             gr.Markdown("**Nothing is booked until you approve the exact details.** / **ما بنحجز قبل موافقتك على التفاصيل.**")
-            with gr.Accordion("Diagnostics / تفاصيل تقنية", open=False):
-                transcript = gr.Textbox(label="Transcript / النص المسموع", interactive=False)
-                status = gr.Markdown("**State:** -")
-                tools = gr.Markdown("_none_")
-    outs = [chat, transcript, status, tools, pending_md, pending_state, approve_btn, reject_btn, speech]
+            transcript = gr.Textbox(label="Transcript / النص المسموع", interactive=False)
+    outs = [chat, transcript, pending_md, pending_state, approve_btn, reject_btn]
     demo.load(connection_status, None, connection)
     refresh.click(connection_status, None, connection)
-    replay.click(None, [speech], None, js=SPEAK_JS)
     for event in (msg.submit, send.click):
-        event(send_text, [msg, chat], outs + [msg], concurrency_id="conversation", concurrency_limit=1).then(None, [speech, autoplay], None, js=SPEAK_JS)
+        event(send_text, [msg, chat], outs + [msg], concurrency_id="conversation", concurrency_limit=1)
     for event in (mic.stop_recording, mic.upload):
-        event(send_voice, [mic, chat, recording_language], outs + [voice_token], concurrency_id="conversation", concurrency_limit=1).then(None, [speech, autoplay], None, js=SPEAK_JS)
+        event(send_voice, [mic, chat, recording_language], outs + [voice_token], concurrency_id="conversation", concurrency_limit=1)
     mic.start_recording(start_recording, None, voice_token, queue=False)
     mic.clear(start_recording, None, voice_token, queue=False)
-    approve_btn.click(approve, [pending_state, chat], outs, concurrency_id="conversation", concurrency_limit=1).then(None, [speech, autoplay], None, js=SPEAK_JS)
-    reject_btn.click(reject, [pending_state, chat], outs, concurrency_id="conversation", concurrency_limit=1).then(None, [speech, autoplay], None, js=SPEAK_JS)
+    approve_btn.click(approve, [pending_state, chat], outs, concurrency_id="conversation", concurrency_limit=1)
+    reject_btn.click(reject, [pending_state, chat], outs, concurrency_id="conversation", concurrency_limit=1)
 
 if __name__ == "__main__":
     demo.launch(server_port=int(os.getenv("UI_PORT") or 7860), css=UI_CSS,

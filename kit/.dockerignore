@@ -1,4 +1,7 @@
 .env
+**/.env
+**/.env.*
+.env.*
 .git
 .venv
 venv
@@ -7,3 +10,8 @@ voice/models
 samples
 evals/scorecard.*
 .gradio
+**/*.log
+**/*.wav
+**/*.mp3
+**/*.db
+**/*.sqlite*

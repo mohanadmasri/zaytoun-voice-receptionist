@@ -17,12 +17,14 @@ from pydantic import BaseModel, model_validator, field_validator, ValidationErro
 import logging
 from agent.state import AgentState
 from agent.service_mapping import explicit_service_evidence, match_service
-from agent.times import normalize_time, period_reply
+from agent.times import is_appointment_time_change, normalize_time, period_reply
 from agent.patient_identity import (valid_patient_name, third_party_request, clear_patient, normalize_patient_phone,
                                     explicit_phone, spoken_phone_digits, phone_validation_issue, patient_name_noise,
-                                    phone_confirmation_reply)
-from agent.dates import ENGLISH_MONTHS, ARABIC_MONTHS
-from agent.slot_selection import extract_time, find_slots_by_id, extract_option_numbers, has_slot_reference
+                                    phone_confirmation_reply, phone_text_candidate)
+from agent.patient_names import declared_patient_name, literal_patient_name, patient_name_statement
+from agent.dates import (ENGLISH_MONTHS, ARABIC_MONTHS, UNSPECIFIED_DATE, arabic_day_reply,
+                         explicit_calendar_date_text, normalize_date, relative_date_text)
+from agent.slot_selection import extract_time, find_slots_by_id, extract_option_numbers, has_slot_reference, offered_clock_times
 # تحميل متغيرات البيئة من ملف .env
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
@@ -170,6 +172,7 @@ async def extract_request(message: str) -> IntakeResult:
     "patient_name, patient_phone, provider_text, provider_any, "
     "intent, safety, injection_detected, guardian_name, patient_age, cancellation_booking_id. "
     "Extract the actual patient's full name separately from guardian_name. "
+    "Copy patient_name verbatim from the message. Never infer, translate, or repair any part of the name. "
     "patient_age is an integer only if explicitly stated. Never use a relationship as a name. "
     "For an explicit cancellation request use intent=cancel_booking and copy the BK- booking reference if provided. "
 
@@ -358,15 +361,56 @@ def update_state_from_intake(
     # ننسخ الحالة كي لا نعدّل النسخة الأصلية مباشرة.
     updated_state = state.copy()
     message = state.get("current_message", "")
-    phone_context = bool(state.get("selected_slot_id") and valid_patient_name(state.get("patient_name")) and
+    switching_patient = third_party_request(message)
+    current_name = state.get("patient_name")
+    name = None
+    if (result.intent in ("booking", "other") and result.language != "unsupported"
+            and result.safety == "none" and not result.injection_detected and not switching_patient):
+        name = declared_patient_name(message, current_name, result.patient_name)
+        statement = patient_name_statement(message, standalone=True)
+        if (current_name and state.get("selected_slot_id")
+                and (statement is not None or (name and patient_name_statement(message) is None))):
+            # A standalone correction keeps the selected appointment and confirmed phone.
+            return {**updated_state, "patient_name": name,
+                    "pending_action": None if name != current_name else state.get("pending_action"),
+                    "intent": "booking", "safety": "none", "injection_detected": False,
+                    "language": result.language if result.language in ("ar", "en") else state.get("language", "unknown")}
+    if not name and (switching_patient or (not current_name and patient_name_statement(message) is None)):
+        name = literal_patient_name(message, result.patient_name)
+    result = result.model_copy(update={"patient_name": name})
+    if result.intent in ("booking", "other") and result.language != "unsupported":
+        calendar_date = explicit_calendar_date_text(message)
+        relative_date = relative_date_text(message)
+        literal_date = UNSPECIFIED_DATE if calendar_date and relative_date else calendar_date or relative_date
+        # Keep the spoken clock evidence when extraction dropped or guessed its period.
+        if relative_date and offered_clock_times(message):
+            result = result.model_copy(update={"time_text": message})
+        if not literal_date and state.get("stage") == "awaiting_details" and not state.get("requested_date"):
+            literal_date = arabic_day_reply(message)
+        if literal_date:
+            # Keep a correct extraction when it agrees with the literal date in clinic time.
+            today = state.get("clinic_today")
+            literal_iso = normalize_date(literal_date, today) if today else None
+            if not literal_iso or literal_iso != normalize_date(result.date_text, today):
+                result = result.model_copy(update={"date_text": literal_date})
+    if (state.get("service_id") and state.get("requested_date") and not relative_date_text(message)
+            and is_appointment_time_change(message)
+            and result.intent in ("booking", "other")):
+        # A time-only change uses the current appointment and the literal request.
+        result = result.model_copy(update={"time_text": None, "date_text": None, "service_text": None,
+                                           "provider_text": None, "provider_any": False,
+                                           "patient_name": None, "patient_phone": None})
+    phone_context = bool(not state.get("time_change_pending") and state.get("selected_slot_id") and valid_patient_name(state.get("patient_name")) and
                          (not state.get("patient_phone") or state.get("confirmed_phone") != state.get("patient_phone")))
+    literal_phone = None
     confirmation = phone_confirmation_reply(message) if state.get("stage") == "awaiting_phone_confirmation" else None
     if confirmation is not None:
         result = result.model_copy(update={key: None for key in ("patient_name", "patient_phone", "date_text", "time_text", "service_text", "provider_text")})
         if confirmation and normalize_patient_phone(state.get("patient_phone")):
             updated_state["confirmed_phone"] = state["patient_phone"]
-        elif not confirmation:
-            updated_state.update({"patient_phone": None, "confirmed_phone": None, "phone_candidate": None})
+        else:
+            updated_state.update({"patient_phone": None, "confirmed_phone": None, "phone_candidate": None,
+                                  "pending_action": None})
     elif patient_name_noise(state, message):
         result = result.model_copy(update={key: None for key in ("patient_name", "patient_phone", "date_text", "time_text", "service_text", "provider_text")})
     elif (state.get("stage") == "awaiting_patient_details" and state.get("selected_slot_id")
@@ -383,11 +427,16 @@ def update_state_from_intake(
                 and not explicit_service_evidence(message) and normalize_time(message)["kind"] == "unrecognized"
                 and name.casefold() not in {"thank you", "thanks again", "no thanks", "yes please", "not sure",
                                             "my name", "any doctor", "hello there", "try again"}):
-            result = result.model_copy(update={"patient_name": name})
-    elif phone_context and (digits := spoken_phone_digits(message)) is not None:
-        result = result.model_copy(update={"patient_phone": digits, "patient_name": None, "time_text": None, "date_text": None, "provider_text": None})
+            result = result.model_copy(update={"patient_name": literal_patient_name(message, name)})
+    elif phone_context and (literal_phone := spoken_phone_digits(message)) is not None:
+        result = result.model_copy(update={"patient_phone": literal_phone, "patient_name": None, "time_text": None, "date_text": None, "provider_text": None})
+    elif phone_context and result.patient_phone:
+        # In the dedicated phone turn, an extractor cannot pick one number
+        # from an ambiguous reply or supply digits absent from the transcript.
+        result = result.model_copy(update={"patient_phone": None})
     if result.patient_phone:
-        candidate = explicit_phone(message) or result.patient_phone
+        # A numeric substring can omit a spoken digit at either end of the transcript.
+        candidate = literal_phone or phone_text_candidate(message) or result.patient_phone
         phone = normalize_patient_phone(candidate)
         updated_state["phone_candidate"] = candidate[:48]
         updated_state["phone_error_reason"] = phone_validation_issue(candidate)
@@ -398,6 +447,7 @@ def update_state_from_intake(
         result = result.model_copy(update={"patient_phone": phone})
         if phone is None:
             updated_state["patient_phone"] = None
+            updated_state["confirmed_phone"] = None
             updated_state["pending_action"] = None
     # Recover an explicit clock time when extraction loses its AM/PM marker.
     elif re.search(r"\b[ap]\.?\s*m\b", message, re.I) and not re.search(r"\b(?:after|before)\b", message, re.I):
@@ -406,7 +456,8 @@ def update_state_from_intake(
             if normalize_time(message)["kind"] == "exact":
                 result = result.model_copy(update={"time_text": message})
     period = period_reply(message)
-    if period and state.get("selection_candidates") and state.get("proposed_slots"):
+    if period and (state.get("time_change_pending") or
+                   (state.get("selection_candidates") and state.get("proposed_slots"))):
         result = result.model_copy(update={"time_text": None})
     elif period and normalize_time(state.get("time_text"))["kind"] == "ambiguous":
         result = result.model_copy(update={"time_text": (state.get("time_text") or "") + " " + period})
@@ -417,7 +468,6 @@ def update_state_from_intake(
     if result.date_text:
         weekday_only = re.fullmatch(r"(?:يوم\s+)?(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|الاثنين|الثلاثاء|الأربعاء|الخميس|الجمعة|السبت|الأحد)[.!؟?]?", result.date_text.strip(), re.I)
         if weekday_only and state.get("date_conflict") and re.search(r"\b(?:I mean|I meant)\b|قصدي|أقصد|اقصد", message, re.I):
-            from agent.dates import normalize_date
             from datetime import date, timedelta
             weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
             arabic_weekdays = ["الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت", "الأحد"]
@@ -447,7 +497,7 @@ def update_state_from_intake(
             result = result.model_copy(update={"date_text": None})
         else:
             updated_state["date_conflict"] = None
-    if third_party_request(message):
+    if switching_patient:
         updated_state = clear_patient(updated_state)
         updated_state["guardian_name"] = None
         updated_state["patient_is_other"] = True
@@ -479,10 +529,6 @@ def update_state_from_intake(
     elif result.service_text and state.get("cancellation_requested"):
         updated_state["cancellation_requested"] = False
         updated_state["cancellation_booking_id"] = None
-        updated_state["pending_action"] = None
-    if result.patient_name and not valid_patient_name(result.patient_name):
-        result = result.model_copy(update={"patient_name": None})
-        updated_state["patient_name"] = None
         updated_state["pending_action"] = None
     if result.patient_name and state.get("patient_name") and result.patient_name != state["patient_name"]:
         # تصحيح الاسم لا يبدّل المريض تلقائيًا؛ الطلب الصريح لشخص آخر عولج أعلاه.
@@ -552,6 +598,7 @@ def update_state_from_intake(
         updated_state["pending_action"] = None
 
         if field in appointment_fields:
+            updated_state["time_change_pending"] = False
             # تغيّر شروط البحث: لا يجوز استخدام المواعيد القديمة.
             updated_state["proposed_slots"] = []
             updated_state["selected_slot_id"] = None

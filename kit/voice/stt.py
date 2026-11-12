@@ -13,7 +13,7 @@ STT_PROVIDER (env):
                  model download. Optional extra: pip install faster-whisper==1.2.1 "av<19"
 
 WAV is resampled to 16 kHz mono before upload. Rate limits (429) and transient upstream errors are
-retried twice. The openrouter provider accepts WAV and MP3 only;
+retried once. The openrouter provider accepts WAV and MP3 only;
 browser recordings in WebM/Ogg need converting first (the kit's Gradio UI already sends WAV),
 or use whisper_local, which decodes them with PyAV.
 
@@ -50,6 +50,31 @@ request_metrics = local()
 
 class STTError(RuntimeError):
     """Transcription failed; the message is safe to log."""
+
+    def __init__(self, message: str, *, timed_out: bool = False, upstream_status: int | None = None, transport_error: bool = False):
+        super().__init__(message)
+        self.timed_out = timed_out
+        self.upstream_status = upstream_status
+        self.transport_error = transport_error
+
+
+def _completion_status(payload: dict, http_status: int) -> int:
+    """Read OpenRouter errors that arrived inside a successful HTTP response."""
+    error = payload.get("error")
+    choices = payload.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices else None
+    if error is None and isinstance(choice, dict):
+        error = choice.get("error")
+        if error is None and choice.get("finish_reason") in ("error", "length", "content_filter"):
+            raise STTError("Speech-to-text completion failed")
+    if error is None:
+        return http_status
+    code = error.get("code") if isinstance(error, dict) else None
+    if isinstance(code, str) and len(code) == 3 and code.isascii() and code.isdecimal():
+        code = int(code)
+    if not isinstance(code, int) or not 400 <= code < 600:
+        raise STTError("Speech-to-text returned an error response")
+    return code
 
 
 def sniff_format(data: bytes) -> str:
@@ -137,7 +162,6 @@ def _openrouter(data: bytes, fmt: str, language_hint: str | None, phone_mode: bo
         body["model"] = model
     base = (os.getenv("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1").rstrip("/")
     request_metrics.encoding_ms = round((time.perf_counter() - encoding_started) * 1000, 2)
-    r = None
     # ميزانية محدودة داخل مهلة المحول، ولا يستمر thread لثلاث محاولات ×60 ثانية بعد فشل API.
     deadline = time.monotonic() + 35
     for attempt in range(2):
@@ -146,15 +170,24 @@ def _openrouter(data: bytes, fmt: str, language_hint: str | None, phone_mode: bo
                            headers={"Authorization": f"Bearer {key}", "X-Title": "clinic-voice-receptionist"})
         except httpx.HTTPError as exc:
             if attempt == 1:
-                raise STTError(f"Speech-to-text request failed: {exc.__class__.__name__}") from None
+                raise STTError(f"Speech-to-text request failed: {exc.__class__.__name__}",
+                               timed_out=isinstance(exc, httpx.TimeoutException), transport_error=True) from None
         else:
-            if r.status_code not in (429, 500, 502, 503, 504):
+            status = r.status_code
+            if status < 400:
+                try:
+                    payload = r.json()
+                except ValueError:
+                    raise STTError("Invalid speech-to-text response") from None
+                if not isinstance(payload, dict):
+                    raise STTError("Invalid speech-to-text response")
+                status = _completion_status(payload, status)
+            if status not in (429, 500, 502, 503, 504):
                 break
         if attempt == 0:
             time.sleep(1.5)
-    if r.status_code >= 400:
-        raise STTError(f"Speech-to-text failed ({r.status_code})")
-    payload = r.json()
+    if status >= 400:
+        raise STTError(f"Speech-to-text failed ({status})", upstream_status=status)
     last_usage.clear()
     last_usage.update(payload.get("usage") or {})
     last_usage["model"] = payload.get("model")

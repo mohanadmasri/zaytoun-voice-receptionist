@@ -210,7 +210,9 @@ class ReliabilityConversationTests(unittest.IsolatedAsyncioTestCase):
             for field in ("patient_name", "patient_phone", "service_id", "requested_date", "selected_slot_id", "pending_action"):
                 self.assertIsNone(self.state()[field], field)
             self.assertEqual(self.state()["proposed_slots"], [])
-            self.assertEqual(self.gateway.reads, [])
+            self.assertEqual(self.gateway.reads, [("list_services", {})])
+            self.assertIn("حشوة أسنان", data["reply"])
+            self.assertEqual(self.gateway.writes, [])
 
     async def test_greeting_preserves_pending_booking(self):
         await self.pending()

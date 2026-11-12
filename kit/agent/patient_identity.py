@@ -2,6 +2,8 @@
 import re
 import unicodedata
 
+from core.phone import DIGIT_TRANSLATION, normalize_patient_phone, phone_validation_issue
+
 
 # يقبل أسماء عربية أو لاتينية متعددة الأجزاء، ويرفض الأرقام والأوصاف والبدائل الواضحة.
 def valid_patient_name(name: str | None) -> bool:
@@ -20,59 +22,43 @@ def valid_patient_name(name: str | None) -> bool:
     return len(text.split()) >= 2 and all(sum(c.isalpha() for c in part) >= 2 for part in text.split())
 
 
-# نفس الصيغ التي يقبلها عقد العيادة؛ لا نخترع صفرًا أو رمز دولة لرقم ناقص.
-def normalize_patient_phone(value: str | None) -> str | None:
-    if not isinstance(value, str):
-        return None
-    text = value.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789"))
-    text = re.sub(r"[\s\-.()/]", "", text)
-    if text.startswith("+"):
-        text = text[1:]
-    if text.startswith("00"):
-        text = text[2:]
-    for country in ("970", "972"):
-        if text.startswith(country) and len(text) == 12:
-            text = "0" + text[3:]
-    return text if re.fullmatch(r"0\d{8,9}", text) else None
+# Preserve the literal numeric candidate even if it fails validation.
+def phone_text_candidate(message: str) -> str | None:
+    candidates = set(re.findall(r"(?<![\w])(?:\+|00)?\d[\d\s()./-]{7,}\d(?!\w)", message))
+    return next(iter(candidates)) if len(candidates) == 1 else None
 
 
-# دليل هاتف صريح وحيد في الرسالة يحافظ على الصفر الذي كتبه المريض إن أسقطه LLM.
 def explicit_phone(message: str) -> str | None:
-    candidates = re.findall(r"(?<![\w])(?:\+|00)?\d[\d\s()./-]{7,}\d(?!\w)", message)
-    phones = {phone for value in candidates if (phone := normalize_patient_phone(value))}
-    return next(iter(phones)) if len(phones) == 1 else None
+    return normalize_patient_phone(phone_text_candidate(message))
 
 
 # يفك تسلسل أرقام منطوقًا حرفيًا فقط؛ لا يحول مئات أو تخمينات إلى هاتف.
 def spoken_phone_digits(message: str) -> str | None:
-    text = message.casefold().translate(str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789"))
-    text = re.sub(r"^(?:my (?:phone(?: number)?|number)(?: is)?|phone(?: number)?(?: is)?|رقم (?:تلفوني|هاتفي)(?: هو)?|رقمي(?: هو)?|تلفوني)\s*[:،]?\s*", "", text.strip())
+    text = message.casefold().translate(DIGIT_TRANSLATION)
+    # Arabic transcripts can include invisible direction marks around digit runs.
+    text = re.sub(r"[\u061c\u064b-\u0652\u0670\u200e\u200f]", "", text)
+    # Only standalone hesitation tokens may be removed. Keep correction and
+    # ambiguity words so the whole utterance still has to describe one number.
+    text = re.sub(r"(?<![\w+])(?:آه|اه|أمم|امم)(?!\w)", " ", text)
+    text = text.strip().strip(",،").strip().rstrip("!.۔؟?").strip()
+    text = re.sub(
+        r"^(?:my (?:phone(?: number)?|number)(?: is)?|phone(?: number)?(?: is)?|"
+        r"(?:لا[\s,،]+)?(?:رقم\s+(?:تلفوني|هاتفي|جوالي|الهاتف|التلفون|الجوال|الموبايل|موبايلي)"
+        r"(?:\s+تبعي)?|رقمي|تلفوني|هاتفي|جوالي|موبايلي)(?:\s+الصحيح)?(?:\s+هو)?)\s*[:،]?\s*",
+        "", text.strip(),
+    )
+    prefix, text = ("+", text[1:]) if text.startswith("+") else ("", text)
     words = dict(zip("zero one two three four five six seven eight nine".split(), "0123456789"))
     words.update({"oh": "0", "صفر": "0", "واحد": "1", "واحدة": "1", "اثنين": "2", "اتنين": "2", "تنين": "2",
-                  "ثلاثة": "3", "تلاتة": "3", "أربعة": "4", "اربعة": "4", "خمسة": "5", "ستة": "6", "سبعة": "7",
+                  "إثنين": "2", "اثنان": "2", "إثنان": "2", "إتنين": "2",
+                  "ثلاثة": "3", "تلاتة": "3", "أربعة": "4", "اربعة": "4", "خمسة": "5", "ستة": "6", "ست": "6", "سبعة": "7",
                   "ثمانية": "8", "تمانية": "8", "تسعة": "9", "تسع": "9"})
     tokens = re.findall(r"\w+|\+", text)
-    if not tokens or re.search(r"[^\w\s+,،.()/-]", text):
+    if not tokens or re.search(r"[^\w\s+,،.۔()\-‐‑–]", text):
         return None
     if all(token.isdecimal() or token in words for token in tokens):
-        return "".join(token if token.isdecimal() else words[token] for token in tokens)
+        return prefix + "".join(token if token.isdecimal() else words[token] for token in tokens)
     return None
-
-
-# سبب رفض محدد وفق norm_phone الأصلية؛ صحة الشكل لا تعني دقة STT أو ملكية الرقم.
-def phone_validation_issue(value: str | None) -> str | None:
-    if normalize_patient_phone(value):
-        return None
-    if not isinstance(value, str):
-        return "format"
-    text = re.sub(r"[\s\-.()/]", "", value.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")))
-    text = text[1:] if text.startswith("+") else text
-    text = text[2:] if text.startswith("00") else text
-    if not text.isdecimal():
-        return "format"
-    if text.startswith(("970", "972")):
-        return "length" if len(text) != 12 else "prefix"
-    return "length" if len(text) not in (9, 10) else "prefix"
 
 
 # ضجيج اسم بعد اختيار موعد لا يُعد طلب تغيير موعد؛ الاختيار الصريح يبقى متاحًا.

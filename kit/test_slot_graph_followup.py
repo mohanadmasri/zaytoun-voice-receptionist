@@ -49,8 +49,67 @@ async def send(state, message, extracted):
     return updated
 
 
+async def check_arabic_offered_clocks():
+    initial = create_initial_state("arabic-offered-clocks")
+    initial.update(
+        language="ar", stage="slots_proposed", intent="booking",
+        service_id="dental_checkup", service_text="dental checkup",
+        requested_date="2026-11-03", date_text="November 3, 2026",
+        provider_choice="any", time_kind="missing",
+        proposed_slots=[
+            {"slot_id": f"SL-AR-{index}", "date": "2026-11-03", "start": clock,
+             "provider_id": "dr_nassar", "provider_name": "Dr. Sami Nassar",
+             "service_id": "dental_checkup"}
+            for index, clock in enumerate(("09:00", "09:15", "09:30"))
+        ],
+    )
+
+    async def reply(state, message, time_text=None):
+        return await send(deepcopy(state), message, IntakeResult(
+            language="ar", intent="booking", time_text=time_text))
+
+    for message in ("موعد الساعة تسع وربع", "تسع وربع", "تسعة وربع", "الساعة تسع وربع",
+                    "الساعة التاسعة والربع", "تسعة وخمستعش", "٩:١٥", "9:15", "الخيار الثاني"):
+        for time_change_pending in (True, False):
+            state = await reply({**initial, "time_change_pending": time_change_pending},
+                                message, message if message != "الخيار الثاني" else None)
+            assert state["selected_slot_id"] == "SL-AR-1", (message, state["reply"])
+            assert state["stage"] == "awaiting_patient_details"
+            assert state["proposed_slots"] == initial["proposed_slots"]
+            repeated = await reply(state, "تسعة وربع", "تسعة وربع")
+            assert repeated["selected_slot_id"] == "SL-AR-1"
+
+    for message in ("الساعة تسع وستين", "الساعة 9:99:15",
+                    "الساعة 9 و 15 تقريبًا", "الساعة تسع و 9:15", "الساعة تسع وربعان"):
+        state = await reply(initial, message, "9:15 AM")
+        assert state["selected_slot_id"] is None, (message, state["reply"])
+        assert state["proposed_slots"] == initial["proposed_slots"]
+
+    absent = await reply(initial, "الساعة ثمانية وربع", "8:15 AM")
+    assert absent["selected_slot_id"] is None
+    evening = {**initial["proposed_slots"][1], "slot_id": "SL-AR-PM", "start": "21:15"}
+    state = await reply({**initial, "proposed_slots": [*initial["proposed_slots"], evening]},
+                        "موعد الساعة تسع وربع", "9:15 AM")
+    assert state["selected_slot_id"] is None
+    assert state["selection_candidates"] == ["SL-AR-1", "SL-AR-PM"]
+    assert "صباح" in state["reply"] and "مساء" in state["reply"]
+    clarified = await reply(state, "مساء")
+    assert clarified["selected_slot_id"] == "SL-AR-PM"
+
+    duplicate = {**initial["proposed_slots"][1], "slot_id": "SL-AR-DUPLICATE"}
+    state = await reply({**initial, "proposed_slots": [*initial["proposed_slots"], duplicate]},
+                        "تسعة وربع")
+    assert state["selected_slot_id"] is None
+    assert state["selection_candidates"] == ["SL-AR-1", "SL-AR-DUPLICATE"]
+    repeated = await reply(state, "تسعة وربع")
+    assert repeated["selected_slot_id"] is None
+    assert repeated["selection_candidates"] == state["selection_candidates"]
+    print("PASSED: spoken Arabic clocks resolve only matching offered slots")
+
+
 # تشغّل حالات الالتباس والاختيار والبيانات والموافقة والسلامة وتغيير البحث.
 async def main():
+    await check_arabic_offered_clocks()
     state = create_initial_state("slot_graph_followup_test")
     state.update({
         "language": "en", "stage": "slots_proposed", "intent": "booking",
@@ -170,5 +229,78 @@ async def main():
     print("ALL GRAPH FOLLOW-UP TESTS PASSED")
 
 
+async def test_single_offered_appointment_agreement():
+    state = create_initial_state("single_offered_appointment_agreement")
+    state.update({
+        "language": "ar", "stage": "slots_proposed", "intent": "booking",
+        "service_id": "dental_checkup", "requested_date": "2026-11-12",
+        "clinic_today": "2026-11-11",
+        "reply": "لقيت مواعيد متاحة ليوم 12 نوفمبر 2026:\n\n1. 3:00 مساءً مع د. رانيا خوري\nأي موعد بناسبك؟",
+        "proposed_slots": [{
+            "slot_id": "SL-RANIA", "date": "2026-11-12", "start": "15:00",
+            "provider_id": "dr_khoury", "provider_name_ar": "د. رانيا خوري",
+            "service_id": "dental_checkup",
+        }],
+    })
+    for message, language in (
+        ("آه هذا الموعد مناسب لي", "ar"), ("هذا الموعد مناسب لي", "ar"),
+        ("آه مناسب إلي", "ar"), ("آه مناسب", "ar"), ("مناسب", "ar"),
+        ("بدي هاد الموعد", "ar"), ("تمام", "ar"),
+        ("نعم", "ar"), ("بدي هذا الموعد", "ar"), ("موافق على هذا الموعد", "ar"),
+        ("yes", "en"), ("that works", "en"), ("this appointment is fine", "en"),
+    ):
+        updated = await send(deepcopy(state), message, IntakeResult(language=language, intent="other"))
+        assert updated["stage"] == "awaiting_patient_details", (message, updated["reply"])
+        assert updated["selected_slot_id"] == "SL-RANIA"
+        assert updated["reply"] == (
+            "شو اسم المريض الكامل؟" if language == "ar" else "What is the patient's full name?"
+        )
+        assert updated["pending_action"] is None
+
+    arabic = IntakeResult(language="ar", intent="other")
+    declined = await send(deepcopy(state), "لا مش مناسب", arabic)
+    assert declined["selected_slot_id"] is None
+    assert declined["pending_action"] is None
+
+    multiple = deepcopy(state)
+    multiple["proposed_slots"].append({
+        **multiple["proposed_slots"][0], "slot_id": "SL-LATER", "start": "10:30",
+    })
+    unclear = await send(deepcopy(multiple), "آه هذا الموعد مناسب لي", arabic)
+    assert unclear["stage"] == "awaiting_slot_selection", unclear["reply"]
+    assert unclear["selected_slot_id"] is None
+    assert unclear["pending_action"] is None
+    assert unclear["proposed_slots"] == multiple["proposed_slots"]
+    explicit = await send(unclear, "الموعد الأول", arabic)
+    assert explicit["selected_slot_id"] == "SL-RANIA"
+    assert explicit["stage"] == "awaiting_patient_details"
+
+    stale = {**deepcopy(state), "offer_context": {"request": {"requested_date": "2026-11-13"}}}
+    expired = {**deepcopy(state), "clinic_today": "2026-11-13"}
+    for old_offer in (stale, expired):
+        rejected = await send(old_offer, "آه هذا الموعد مناسب لي", arabic)
+        assert rejected["selected_slot_id"] is None
+        assert rejected["pending_action"] is None
+
+    one_remaining = deepcopy(multiple)
+    one_remaining["proposed_slots"][0]["date"] = "2026-11-10"
+    remaining = await send(one_remaining, "آه هذا الموعد مناسب", arabic)
+    assert remaining["selected_slot_id"] == "SL-LATER"
+    assert remaining["stage"] == "awaiting_patient_details"
+
+    ready = {
+        **deepcopy(state), "patient_name": "Lina Mansour",
+        "patient_phone": "0599000999", "confirmed_phone": "0599000999",
+    }
+    pending = await send(ready, "yes", IntakeResult(language="en", intent="other"))
+    assert pending["stage"] == "awaiting_approval", pending["reply"]
+    assert pending["pending_action"]["type"] == "create_booking"
+    repeated = await send(pending, "this appointment is fine", IntakeResult(language="en", intent="other"))
+    assert repeated["stage"] == "awaiting_approval", repeated["reply"]
+    assert repeated["pending_action"]["action_id"] == pending["pending_action"]["action_id"]
+    print("PASSED: single-slot agreement, clarification, stale offers, and separate booking approval")
+
+
 if __name__ == "__main__":
+    asyncio.run(test_single_offered_appointment_agreement())
     asyncio.run(main())

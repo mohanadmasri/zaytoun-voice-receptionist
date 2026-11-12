@@ -6,6 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 RUN pip install --no-cache-dir fastapi==0.141.1 uvicorn==0.52.1 pydantic==2.12.5 python-dotenv==1.2.4 tzdata==2026.5
 COPY services/ ./services/
+COPY core/phone.py ./core/phone.py
 
 EXPOSE 8101
 HEALTHCHECK --interval=10s --timeout=3s --retries=5 \

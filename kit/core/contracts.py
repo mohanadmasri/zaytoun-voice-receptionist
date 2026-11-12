@@ -26,6 +26,8 @@ class PendingAction(TypedDict):
 
 
 class ChatResponse(TypedDict):
+    appointment_history: NotRequired[bool]
+    appointment_selection_changed: NotRequired[bool]
     timings: NotRequired[dict[str, float | None]]
     transcript_token: NotRequired[str]
     needs_transcript_confirmation: NotRequired[bool]
